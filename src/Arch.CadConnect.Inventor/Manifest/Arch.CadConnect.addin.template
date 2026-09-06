@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Arch Engineering CAD Connect add-in manifest (TEMPLATE).
+
+  scripts/install-addin.ps1 substitutes the assembly-path token below with the
+  absolute path of the built Arch.CadConnect.Inventor.dll and writes the result
+  to  %APPDATA%\Autodesk\Inventor <year>\Addins\Arch.CadConnect.addin
+  (per-user; no administrator rights required).
+
+  ClassId / ClientId MUST match ArchAddInInfo.AddInClsid and the COM
+  registration the same script performs against the comhost.
+-->
+<Addin Type="Standard">
+  <ClassId>{93C45016-BDCA-4734-BB1A-4A06C36E900C}</ClassId>
+  <ClientId>{93C45016-BDCA-4734-BB1A-4A06C36E900C}</ClientId>
+
+  <DisplayName Language="1033">Arch Engineering CAD Connect</DisplayName>
+  <Description Language="1033">Arch Engineering PLM connectivity for Autodesk Inventor (sign in, and - in later milestones - Get Latest, Checkout, Check In).</Description>
+
+  <Assembly>%ASSEMBLY_PATH%</Assembly>
+
+  <!-- Inventor 2025 = 29, Inventor 2026 = 30. Load on 2025 and newer. -->
+  <SupportedSoftwareVersionGreaterThan>28..</SupportedSoftwareVersionGreaterThan>
+
+  <LoadOnStartUp>1</LoadOnStartUp>
+  <LoadBehavior>1</LoadBehavior>
+  <UserUnloadable>1</UserUnloadable>
+  <Hidden>0</Hidden>
+</Addin>

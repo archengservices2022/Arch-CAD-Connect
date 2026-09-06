@@ -1,0 +1,67 @@
+using Arch.CadConnect.Api.Dtos;
+using Arch.CadConnect.Core.Session;
+
+namespace Arch.CadConnect.Api;
+
+/// <summary>
+/// The typed boundary between the Inventor add-in and the Arch PLM server.
+/// Every server interaction the add-in will ever need is declared here so the
+/// rest of the client codes against one seam.
+///
+/// P4A IMPLEMENTS: <see cref="SignInAsync"/>, <see cref="SignOutAsync"/>,
+/// <see cref="GetSessionAsync"/> (the desktop-auth endpoints).
+///
+/// P4B/P4C: the PDM operations below are declared but every implementation
+/// throws <see cref="ArchApiException"/> with
+/// <see cref="ArchApiFailureKind.NotImplemented"/> - the client never fakes a
+/// successful PDM result.
+/// </summary>
+public interface IArchApi
+{
+    ArchServerUri Server { get; }
+
+    // ---- Authentication (P4A) --------------------------------------------
+
+    /// <summary>
+    /// Exchange credentials for a bearer session. The password is used once,
+    /// for this request body, and never stored or logged.
+    /// </summary>
+    Task<IArchSession> SignInAsync(
+        string email,
+        string password,
+        string? clientLabel,
+        CancellationToken ct = default);
+
+    /// <summary>Revoke <paramref name="session"/> server-side. Never throws for an already-dead session.</summary>
+    Task SignOutAsync(IArchSession session, CancellationToken ct = default);
+
+    /// <summary>
+    /// Validate a session and fetch current identity + server clock. Throws
+    /// <see cref="ArchApiException"/> (<see cref="ArchApiFailureKind.Unauthorized"/>)
+    /// if the session is no longer valid.
+    /// </summary>
+    Task<SessionResponseDto> GetSessionAsync(IArchSession session, CancellationToken ct = default);
+
+    // ---- PDM operations (declared for P4B/P4C; not implemented in P4A) ----
+
+    Task<PlmDocumentStatusDto> GetDocumentStatusAsync(IArchSession session, string cadDocumentId, CancellationToken ct = default);
+
+    Task<GetLatestResultDto> GetLatestAsync(IArchSession session, string cadDocumentId, string workspaceRoot, CancellationToken ct = default);
+
+    Task CheckoutAsync(IArchSession session, string cadDocumentId, CancellationToken ct = default);
+
+    Task CheckInAsync(IArchSession session, string cadDocumentId, string localFilePath, CancellationToken ct = default);
+
+    Task UndoCheckoutAsync(IArchSession session, string cadDocumentId, CancellationToken ct = default);
+
+    Task<WhereUsedDto> GetWhereUsedAsync(IArchSession session, string cadDocumentId, CancellationToken ct = default);
+
+    Task<ReleaseInfoDto> GetReleaseInfoAsync(IArchSession session, string itemRevisionId, CancellationToken ct = default);
+}
+
+// Placeholder DTOs for the not-yet-implemented operations. Shaped now so the
+// interface is stable; filled in when the operations land.
+public sealed record PlmDocumentStatusDto(string CadDocumentId, string Status);
+public sealed record GetLatestResultDto(int FileCount);
+public sealed record WhereUsedDto(IReadOnlyList<string> ParentDocumentIds);
+public sealed record ReleaseInfoDto(string ItemRevisionId, string Lifecycle);

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Arch.CadConnect.Core - pure domain / application model.
+
+    HARD RULES (enforced by review, and by having zero references here):
+      - NO Autodesk Inventor / COM reference of any kind.
+      - NO HttpClient / networking implementation (only abstractions).
+      - NO Prisma, database, or server-storage coupling.
+    Portable net8.0 so it is unit-testable on any OS without Inventor.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Arch.CadConnect.Core</RootNamespace>
+    <AssemblyName>Arch.CadConnect.Core</AssemblyName>
+  </PropertyGroup>
+
+</Project>

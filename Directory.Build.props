@@ -1,0 +1,27 @@
+<Project>
+
+  <!--
+    Solution-wide defaults for the Arch CAD Connect (Autodesk Inventor add-in)
+    solution. See inventor/README.md for the full architecture + build notes.
+  -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <Deterministic>true</Deterministic>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+
+    <Company>Arch Engineering Services</Company>
+    <Product>Arch CAD Connect</Product>
+    <Copyright>Copyright (c) Arch Engineering Services</Copyright>
+    <Version>0.4.0-alpha</Version>
+
+    <!-- Restore is expected to work fully offline from the machine NuGet cache
+         for the pinned package versions. -->
+    <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+  </PropertyGroup>
+
+</Project>

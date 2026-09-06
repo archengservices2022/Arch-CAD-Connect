@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Arch.CadConnect.Api - the ONLY project that talks to the Arch PLM server.
+
+    HARD RULES:
+      - HTTP only, and ONLY to the Arch server's API. No direct database,
+        no Prisma, no reading the server's .pdm-storage, no DB credentials.
+      - No Autodesk Inventor / COM reference.
+      - Every response is mapped into a client DTO or a safe ArchApiException;
+        raw server error text is never surfaced to the UI.
+    Portable net8.0 so it is unit-testable with a fake HttpMessageHandler.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Arch.CadConnect.Api</RootNamespace>
+    <AssemblyName>Arch.CadConnect.Api</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Arch.CadConnect.Core\Arch.CadConnect.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- DPAPI (CurrentUser) for encrypting the local session file at rest. -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="4.7.0" />
+  </ItemGroup>
+
+</Project>

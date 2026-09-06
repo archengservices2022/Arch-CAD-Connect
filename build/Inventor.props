@@ -1,0 +1,45 @@
+<Project>
+
+  <!--
+    Locates "Autodesk.Inventor.Interop.dll" WITHOUT hardcoding any one
+    developer machine's install path into source control.
+
+    Resolution order (first hit wins):
+      1. $(ArchInventorInteropDll)          - explicit full path override
+                                              (env var or -p:ArchInventorInteropDll=...)
+      2. build/Inventor.local.props          - a git-ignored file a developer
+                                              can drop next to this one
+                                              setting <ArchInventorInteropDll>
+      3. The version-independent Autodesk "Inventor Interoperability <year>"
+         shared assembly, newest supported year first (2026 then 2025). This
+         is the folder Autodesk documents as the reference target.
+      4. The per-install "Inventor <year>\Bin" copy as a last resort.
+
+    The reference is ALWAYS EmbedInteropTypes=true: the COM type information is
+    baked into our add-in, so a single build loads in BOTH Inventor 2025
+    (release 29) and Inventor 2026 (release 30) - we never take a hard binding
+    on one interop assembly version. See README "Inventor 2025/2026
+    compatibility".
+  -->
+
+  <Import Project="$(MSBuildThisFileDirectory)Inventor.local.props"
+          Condition="Exists('$(MSBuildThisFileDirectory)Inventor.local.props')" />
+
+  <PropertyGroup Condition="'$(ArchInventorInteropDll)' == ''">
+    <_ArchInteropShared2026>$(CommonProgramFiles)\Autodesk Shared\Inventor Interoperability 2026\Bin\Autodesk.Inventor.Interop.dll</_ArchInteropShared2026>
+    <_ArchInteropShared2025>$(CommonProgramFiles)\Autodesk Shared\Inventor Interoperability 2025\Bin\Autodesk.Inventor.Interop.dll</_ArchInteropShared2025>
+    <_ArchInteropBin2026>$(ProgramFiles)\Autodesk\Inventor 2026\Bin\Autodesk.Inventor.Interop.dll</_ArchInteropBin2026>
+    <_ArchInteropBin2025>$(ProgramFiles)\Autodesk\Inventor 2025\Bin\Autodesk.Inventor.Interop.dll</_ArchInteropBin2025>
+
+    <ArchInventorInteropDll Condition="Exists('$(_ArchInteropShared2026)')">$(_ArchInteropShared2026)</ArchInventorInteropDll>
+    <ArchInventorInteropDll Condition="'$(ArchInventorInteropDll)' == '' and Exists('$(_ArchInteropShared2025)')">$(_ArchInteropShared2025)</ArchInventorInteropDll>
+    <ArchInventorInteropDll Condition="'$(ArchInventorInteropDll)' == '' and Exists('$(_ArchInteropBin2026)')">$(_ArchInteropBin2026)</ArchInventorInteropDll>
+    <ArchInventorInteropDll Condition="'$(ArchInventorInteropDll)' == '' and Exists('$(_ArchInteropBin2025)')">$(_ArchInteropBin2025)</ArchInventorInteropDll>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <ArchInventorInteropResolved>false</ArchInventorInteropResolved>
+    <ArchInventorInteropResolved Condition="'$(ArchInventorInteropDll)' != '' and Exists('$(ArchInventorInteropDll)')">true</ArchInventorInteropResolved>
+  </PropertyGroup>
+
+</Project>

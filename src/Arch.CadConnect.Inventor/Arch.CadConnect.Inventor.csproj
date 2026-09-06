@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Arch.CadConnect.Inventor - the ONLY project that references the Autodesk
+    Inventor API. Add-in lifecycle, ribbon, active-document events, command
+    wiring. No COM object ever leaves this project (it maps to COM-free Core
+    types before handing anything to Core/Api).
+
+    Runtime: .NET 8 (Inventor 2025 = release 29, Inventor 2026 = release 30 -
+    both host .NET 8 add-ins; see inventor/README.md). The Inventor interop is
+    referenced with EmbedInteropTypes=true so ONE build loads in both.
+
+    COM activation: EnableComHosting produces Arch.CadConnect.Inventor.comhost.dll,
+    which the install script registers (per-user, no admin). Inventor reads the
+    .addin manifest, finds our ClassId, and CoCreateInstances it.
+  -->
+  <Import Project="..\..\build\Inventor.props" />
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>Arch.CadConnect.Inventor</RootNamespace>
+    <AssemblyName>Arch.CadConnect.Inventor</AssemblyName>
+
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableComHosting>true</EnableComHosting>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <ComHostBitness>x64</ComHostBitness>
+
+    <!-- Interop / WinForms / COM produce some analyzer noise that is expected
+         and reviewed; keep the rest of the strictness. -->
+    <NoWarn>$(NoWarn);CA1416;CS0618;CS8600;CS8601;CS8602;CS8603;CS8604</NoWarn>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+
+    <!-- The build output IS the deliverable that the install script points the
+         .addin manifest at. Keep it self-contained. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Arch.CadConnect.Core\Arch.CadConnect.Core.csproj" />
+    <ProjectReference Include="..\Arch.CadConnect.Api\Arch.CadConnect.Api.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(ArchInventorInteropResolved)' == 'true'">
+    <Reference Include="Autodesk.Inventor.Interop">
+      <HintPath>$(ArchInventorInteropDll)</HintPath>
+      <EmbedInteropTypes>true</EmbedInteropTypes>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="RequireInventorInterop" BeforeTargets="ResolveReferences"
+          Condition="'$(ArchInventorInteropResolved)' != 'true'">
+    <Error Text="Autodesk.Inventor.Interop.dll was not found. Set ArchInventorInteropDll (env var or build/Inventor.local.props) to its full path, or install Inventor 2025/2026. This project cannot build without the Inventor SDK; Core/Api/tests build without it. See inventor/README.md." />
+  </Target>
+
+</Project>

@@ -1,0 +1,19 @@
+# Build output
+bin/
+obj/
+[Bb]uild/output/
+*.user
+*.suo
+.vs/
+
+# Local, machine-specific config (never commit a developer's paths/secrets)
+build/Inventor.local.props
+*.local.props
+appsettings.local.json
+
+# Generated add-in manifests carry an absolute assembly path
+src/Arch.CadConnect.Inventor/Manifest/*.generated.addin
+
+# NuGet
+*.nupkg
+.nuget/
