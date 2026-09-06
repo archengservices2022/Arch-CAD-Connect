@@ -2,6 +2,7 @@ using Arch.CadConnect.Api;
 using Arch.CadConnect.Api.Dtos;
 using Arch.CadConnect.Core.Connection;
 using Arch.CadConnect.Core.Session;
+using Arch.CadConnect.Core.Workspace;
 
 namespace Arch.CadConnect.Api.Tests;
 
@@ -40,8 +41,9 @@ public class ArchConnectionManagerTests
                 new ServerDto("Arch PLM", DateTimeOffset.UtcNow)));
         }
 
+        public Task<ResolvedCadDocument> ResolveCadDocumentAsync(IArchSession s, CadDocumentLookup lu, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Resolve");
+        public Task<MaterializationReport> GetLatestAsync(IArchSession s, GetLatestRequest r, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Get Latest");
         public Task<PlmDocumentStatusDto> GetDocumentStatusAsync(IArchSession s, string id, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Status");
-        public Task<GetLatestResultDto> GetLatestAsync(IArchSession s, string id, string root, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Get Latest");
         public Task CheckoutAsync(IArchSession s, string id, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Checkout");
         public Task CheckInAsync(IArchSession s, string id, string p, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Check In");
         public Task UndoCheckoutAsync(IArchSession s, string id, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Undo Checkout");

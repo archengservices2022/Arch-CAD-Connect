@@ -1,5 +1,6 @@
 using Arch.CadConnect.Core.Connection;
 using Arch.CadConnect.Core.Session;
+using Arch.CadConnect.Core.Workspace;
 
 namespace Arch.CadConnect.Api;
 
@@ -171,6 +172,37 @@ public sealed class ArchConnectionManager
             // user does not have to re-enter credentials once it is back.
             _machine.ServerUnreachable();
             return true;
+        }
+    }
+
+    /// <summary>
+    /// Run a real Get Latest for the current session against the P3B
+    /// workspace-plan + content endpoints, bearer-authenticated. Requires a
+    /// session; if the server rejects the bearer mid-operation the connection
+    /// transitions to <see cref="ConnectionState.Unauthorized"/> and the
+    /// exception is rethrown for the UI. Per-entry outcomes (blocked / failed)
+    /// are in the returned <see cref="MaterializationReport"/>, never thrown.
+    /// </summary>
+    public async Task<MaterializationReport> GetLatestAsync(
+        GetLatestRequest request,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var session = CurrentSession
+            ?? throw new ArchApiException(ArchApiFailureKind.Unauthorized, "Sign in before running Get Latest.");
+
+        try
+        {
+            return await _apiFactory(session.Server).GetLatestAsync(session, request, ct).ConfigureAwait(false);
+        }
+        catch (ArchApiException ex)
+        {
+            if (ex.IsAuthFailure)
+            {
+                ApplyFailure(ex);
+            }
+            throw;
         }
     }
 

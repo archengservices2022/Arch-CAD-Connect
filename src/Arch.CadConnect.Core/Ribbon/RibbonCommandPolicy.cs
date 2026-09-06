@@ -9,8 +9,8 @@ namespace Arch.CadConnect.Core.Ribbon;
 /// boundary: the server re-authorizes every real operation regardless of what
 /// the ribbon allowed the user to click.
 ///
-/// P4A rule: a command that is not implemented this milestone
-/// (<see cref="ArchCommands.IsImplementedInP4A"/> == false) is ALWAYS shown
+/// Rule: a command that is not implemented yet
+/// (<see cref="ArchCommands.IsImplemented"/> == false) is ALWAYS shown
 /// disabled, with a tooltip saying so - never enabled-then-fake-succeed.
 /// </summary>
 public static class RibbonCommandPolicy
@@ -18,7 +18,7 @@ public static class RibbonCommandPolicy
     public static bool IsEnabled(ArchCommand command, ConnectionState connection, CadDocumentContext document)
     {
         // Not built yet -> visible but disabled, everywhere.
-        if (!command.IsImplementedInP4A())
+        if (!command.IsImplemented())
         {
             return false;
         }
@@ -28,6 +28,12 @@ public static class RibbonCommandPolicy
             ArchCommand.SignIn => connection.AllowsSignIn(),
             ArchCommand.SignOut => connection.AllowsSignOut(),
             ArchCommand.ServerStatus => connection is not ConnectionState.SignedOut and not ConnectionState.Connecting,
+
+            // P4B: Get Latest resolves the root by an EXPLICIT document number
+            // the user enters, so it does NOT need an open document - only a
+            // live connection.
+            ArchCommand.GetLatest => connection == ConnectionState.Connected,
+
             _ => false,
         };
     }

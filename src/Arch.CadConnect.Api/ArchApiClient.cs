@@ -5,7 +5,9 @@ using System.Text;
 using System.Text.Json;
 
 using Arch.CadConnect.Api.Dtos;
+using Arch.CadConnect.Api.Workspace;
 using Arch.CadConnect.Core.Session;
+using Arch.CadConnect.Core.Workspace;
 
 namespace Arch.CadConnect.Api;
 
@@ -131,13 +133,38 @@ public sealed class ArchApiClient : IArchApi
         return dto;
     }
 
-    // ---- PDM operations: declared, not implemented in P4A ---------------
+    // ---- Get Latest (P4B) --------------------------------------------
+
+    public Task<ResolvedCadDocument> ResolveCadDocumentAsync(
+        IArchSession session, CadDocumentLookup lookup, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(lookup);
+        return GetLatestOrchestrator.ResolveViaHttpAsync(
+            Server, session, _http, lookup, _options.Timeout, ct);
+    }
+
+    public Task<MaterializationReport> GetLatestAsync(
+        IArchSession session, GetLatestRequest request, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(request);
+
+        // The orchestrator wires resolve + plan fetch + verified downloads +
+        // materialize + manifest. Its plan client / downloader reuse THIS
+        // client's hardened HttpClient (no redirects, no cookies).
+        var orchestrator = new GetLatestOrchestrator(
+            Server,
+            resolve: (s, lu, c) => ResolveCadDocumentAsync(s, lu, c),
+            planClientFactory: s => new WorkspacePlanClient(Server, s, _http, _options.Timeout),
+            downloaderFactory: s => new HttpContentDownloader(Server, s, _http));
+        return orchestrator.RunAsync(session, request, ct);
+    }
+
+    // ---- PDM write operations: declared, not implemented yet (P4C) -------
 
     public Task<PlmDocumentStatusDto> GetDocumentStatusAsync(IArchSession s, string id, CancellationToken ct = default)
         => throw ArchApiException.NotImplemented("Status");
-
-    public Task<GetLatestResultDto> GetLatestAsync(IArchSession s, string id, string root, CancellationToken ct = default)
-        => throw ArchApiException.NotImplemented("Get Latest");
 
     public Task CheckoutAsync(IArchSession s, string id, CancellationToken ct = default)
         => throw ArchApiException.NotImplemented("Checkout");

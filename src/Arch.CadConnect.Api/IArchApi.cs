@@ -1,5 +1,6 @@
 using Arch.CadConnect.Api.Dtos;
 using Arch.CadConnect.Core.Session;
+using Arch.CadConnect.Core.Workspace;
 
 namespace Arch.CadConnect.Api;
 
@@ -11,7 +12,11 @@ namespace Arch.CadConnect.Api;
 /// P4A IMPLEMENTS: <see cref="SignInAsync"/>, <see cref="SignOutAsync"/>,
 /// <see cref="GetSessionAsync"/> (the desktop-auth endpoints).
 ///
-/// P4B/P4C: the PDM operations below are declared but every implementation
+/// P4B IMPLEMENTS: <see cref="ResolveCadDocumentAsync"/>,
+/// <see cref="GetLatestAsync"/> (real, via the existing P3B workspace-plan +
+/// content endpoints, bearer-authenticated).
+///
+/// P4C: the write operations below are declared but every implementation
 /// throws <see cref="ArchApiException"/> with
 /// <see cref="ArchApiFailureKind.NotImplemented"/> - the client never fakes a
 /// successful PDM result.
@@ -42,11 +47,30 @@ public interface IArchApi
     /// </summary>
     Task<SessionResponseDto> GetSessionAsync(IArchSession session, CancellationToken ct = default);
 
-    // ---- PDM operations (declared for P4B/P4C; not implemented in P4A) ----
+    // ---- Get Latest (P4B) ----------------------------------------------
+
+    /// <summary>
+    /// Resolve an explicit selection (a tenant document number, or a stable
+    /// id from a verified workspace manifest) to its authoritative
+    /// <see cref="ResolvedCadDocument"/>. Throws
+    /// <see cref="ArchApiException"/> (<see cref="ArchApiFailureKind.NotFound"/>)
+    /// when nothing matches in the caller's organization.
+    /// </summary>
+    Task<ResolvedCadDocument> ResolveCadDocumentAsync(IArchSession session, CadDocumentLookup lookup, CancellationToken ct = default);
+
+    /// <summary>
+    /// Perform a real Get Latest: resolve -> fetch the version-pinned
+    /// workspace plan -> download the exact FileVersions (size + SHA-256
+    /// verified) -> materialize a safe managed local workspace -> update the
+    /// workspace manifest. Never overwrites an existing user file; an unsafe
+    /// plan is refused wholesale (<see cref="Workspace.UnsafeWorkspacePlanException"/>).
+    /// Per-entry outcomes are in the returned report, never thrown.
+    /// </summary>
+    Task<MaterializationReport> GetLatestAsync(IArchSession session, GetLatestRequest request, CancellationToken ct = default);
+
+    // ---- PDM write operations (declared for P4C; not implemented yet) ----
 
     Task<PlmDocumentStatusDto> GetDocumentStatusAsync(IArchSession session, string cadDocumentId, CancellationToken ct = default);
-
-    Task<GetLatestResultDto> GetLatestAsync(IArchSession session, string cadDocumentId, string workspaceRoot, CancellationToken ct = default);
 
     Task CheckoutAsync(IArchSession session, string cadDocumentId, CancellationToken ct = default);
 
@@ -62,6 +86,5 @@ public interface IArchApi
 // Placeholder DTOs for the not-yet-implemented operations. Shaped now so the
 // interface is stable; filled in when the operations land.
 public sealed record PlmDocumentStatusDto(string CadDocumentId, string Status);
-public sealed record GetLatestResultDto(int FileCount);
 public sealed record WhereUsedDto(IReadOnlyList<string> ParentDocumentIds);
 public sealed record ReleaseInfoDto(string ItemRevisionId, string Lifecycle);

@@ -1,11 +1,13 @@
 using System.Windows.Forms;
 
 using Arch.CadConnect.Api;
+using Arch.CadConnect.Api.Workspace;
 using Arch.CadConnect.Core;
 using Arch.CadConnect.Core.Connection;
 using Arch.CadConnect.Core.Documents;
 using Arch.CadConnect.Core.Ribbon;
 using Arch.CadConnect.Core.Session;
+using Arch.CadConnect.Core.Workspace;
 using Arch.CadConnect.Inventor.Documents;
 using Arch.CadConnect.Inventor.Ribbon;
 using Arch.CadConnect.Inventor.Ui;
@@ -57,7 +59,7 @@ internal sealed class ArchAddInController : IDisposable
         _ribbon.CommandInvoked += OnCommandInvoked;
         _ribbon.Build();
 
-        _documents = new InventorDocumentObserver(_application, _tracker);
+        _documents = new InventorDocumentObserver(_application, _tracker, KnownWorkspaceRoots);
         _tracker.Changed += _ => OnUi(RefreshEnablement);
 
         RefreshEnablement();
@@ -93,11 +95,87 @@ internal sealed class ArchAddInController : IDisposable
                     onDone: () => Info(ServerStatusText()));
                 break;
 
+            case ArchCommand.GetLatest:
+                ShowGetLatestDialog();
+                break;
+
             default:
                 // Never fake a PDM result. Say plainly it is not built yet.
-                Info($"'{command.DisplayName()}' is not available in this milestone (P4A foundation).");
+                Info($"'{command.DisplayName()}' is not available yet. Coming in a later release.");
                 break;
         }
+    }
+
+    private void ShowGetLatestDialog()
+    {
+        string documentNumber;
+        string workspaceRoot;
+        using (var dialog = new GetLatestDialog())
+        {
+            if (dialog.ShowDialog(new Win32Owner(SafeMainHwnd())) != DialogResult.OK)
+            {
+                return;
+            }
+            documentNumber = dialog.RootDocumentNumber;
+            workspaceRoot = dialog.WorkspaceRoot;
+        }
+
+        var request = new GetLatestRequest
+        {
+            Root = CadDocumentLookup.ByNumber(documentNumber),
+            WorkspaceRoot = workspaceRoot,
+        };
+
+        MaterializationReport? report = null;
+        RunBackground(
+            async ct => report = await _connection.GetLatestAsync(request, ct),
+            "Getting latest",
+            onDone: () =>
+            {
+                // A now-managed open document should pick up its identity.
+                _documents.RefreshFromActiveDocument();
+                RefreshEnablement();
+                if (report is not null)
+                {
+                    ShowGetLatestResult(report);
+                }
+            },
+            timeout: TimeSpan.FromMinutes(15));
+    }
+
+    private void ShowGetLatestResult(MaterializationReport report)
+    {
+        var lines = new List<string> { report.ToSummaryLine() };
+
+        var problems = report.Results
+            .Where(r => r.Status is MaterializationStatus.Blocked or MaterializationStatus.Failed)
+            .ToList();
+        if (problems.Count > 0)
+        {
+            lines.Add("");
+            foreach (var p in problems)
+            {
+                var name = p.RelativePath ?? p.DocumentNumber ?? p.CadDocumentId;
+                lines.Add($"- {name}: {p.Status.ToString().ToLowerInvariant()}"
+                    + (string.IsNullOrWhiteSpace(p.Reason) ? "" : $" ({p.Reason})"));
+            }
+        }
+
+        var text = string.Join(Environment.NewLine, lines);
+        if (report.ReachedValidState)
+        {
+            Info(text);
+        }
+        else
+        {
+            Error(text);
+        }
+    }
+
+    private static IEnumerable<string?> KnownWorkspaceRoots()
+    {
+        var last = ConnectSettings.Load().LastWorkspaceRoot;
+        return string.IsNullOrWhiteSpace(last) ? Array.Empty<string?>() : new[] { last };
     }
 
     private void ShowSignInDialog()
@@ -150,13 +228,17 @@ internal sealed class ArchAddInController : IDisposable
         }
     }
 
-    private void RunBackground(Func<CancellationToken, Task> work, string? title, Action? onDone = null)
+    private void RunBackground(
+        Func<CancellationToken, Task> work,
+        string? title,
+        Action? onDone = null,
+        TimeSpan? timeout = null)
     {
         _ = Task.Run(async () =>
         {
             try
             {
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+                using var cts = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(45));
                 await work(cts.Token).ConfigureAwait(false);
                 if (onDone is not null)
                 {
@@ -168,6 +250,21 @@ internal sealed class ArchAddInController : IDisposable
                 OnUi(() => Error(ex.Message));
             }
             catch (ArchServerUriException ex)
+            {
+                OnUi(() => Error(ex.Message));
+            }
+            catch (UnsafeWorkspacePlanException ex)
+            {
+                var detail = ex.Problems.Count > 0
+                    ? Environment.NewLine + string.Join(Environment.NewLine, ex.Problems.Take(10).Select(p => $"- {p.Message}"))
+                    : "";
+                OnUi(() => Error(ex.Message + detail));
+            }
+            catch (UnsupportedWorkspaceContractException)
+            {
+                OnUi(() => Error("This Arch PLM server is a different version than this add-in supports."));
+            }
+            catch (WorkspaceRootException ex)
             {
                 OnUi(() => Error(ex.Message));
             }

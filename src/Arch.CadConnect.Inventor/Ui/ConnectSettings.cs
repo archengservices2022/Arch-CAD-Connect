@@ -17,6 +17,13 @@ public sealed record ConnectSettings
 
     public string? LastEmail { get; init; }
 
+    /// <summary>
+    /// The local directory the user last chose as a Get Latest workspace root.
+    /// A convenience default only - it is NOT authority for anything and the
+    /// user re-confirms it every time.
+    /// </summary>
+    public string? LastWorkspaceRoot { get; init; }
+
     private static string FilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "ArchEngineering", "CadConnect", "connect.json");

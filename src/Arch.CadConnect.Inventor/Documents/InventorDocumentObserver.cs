@@ -20,6 +20,7 @@ internal sealed class InventorDocumentObserver : IDisposable
 {
     private readonly InventorApi.Application _application;
     private readonly ActiveDocumentTracker _tracker;
+    private readonly Func<IEnumerable<string?>> _workspaceRoots;
     private readonly InventorApi.ApplicationEvents _appEvents;
 
     private readonly InventorApi.ApplicationEventsSink_OnActivateDocumentEventHandler _onActivate;
@@ -29,10 +30,14 @@ internal sealed class InventorDocumentObserver : IDisposable
 
     private bool _disposed;
 
-    public InventorDocumentObserver(InventorApi.Application application, ActiveDocumentTracker tracker)
+    public InventorDocumentObserver(
+        InventorApi.Application application,
+        ActiveDocumentTracker tracker,
+        Func<IEnumerable<string?>>? workspaceRoots = null)
     {
         _application = application;
         _tracker = tracker;
+        _workspaceRoots = workspaceRoots ?? (static () => Array.Empty<string?>());
         _appEvents = application.ApplicationEvents;
 
         _onActivate = OnActivateDocument;
@@ -51,7 +56,7 @@ internal sealed class InventorDocumentObserver : IDisposable
 
     /// <summary>Re-read the active document now (used on start-up and after Save).</summary>
     public void RefreshFromActiveDocument() =>
-        _tracker.Set(DocumentContextFactory.FromActive(_application));
+        _tracker.Set(DocumentContextFactory.FromActive(_application, _workspaceRoots()));
 
     private void OnActivateDocument(
         InventorApi._Document documentObject,
@@ -62,7 +67,7 @@ internal sealed class InventorDocumentObserver : IDisposable
         handlingCode = InventorApi.HandlingCodeEnum.kEventNotHandled;
         if (beforeOrAfter == InventorApi.EventTimingEnum.kAfter)
         {
-            _tracker.Set(DocumentContextFactory.From(documentObject as InventorApi.Document));
+            _tracker.Set(DocumentContextFactory.From(documentObject as InventorApi.Document, _workspaceRoots()));
         }
     }
 
@@ -104,7 +109,7 @@ internal sealed class InventorDocumentObserver : IDisposable
         {
             // A first save gives an unsaved document its path/identity; a later
             // save clears the dirty flag. Either way, refresh.
-            _tracker.Set(DocumentContextFactory.From(documentObject as InventorApi.Document));
+            _tracker.Set(DocumentContextFactory.From(documentObject as InventorApi.Document, _workspaceRoots()));
         }
     }
 

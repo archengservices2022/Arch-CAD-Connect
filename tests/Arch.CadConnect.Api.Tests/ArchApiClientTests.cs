@@ -241,26 +241,20 @@ public class ArchApiClientTests
         Assert.Equal(ArchApiFailureKind.Server, ex.Kind);
     }
 
-    [Theory]
-    [InlineData("Get Latest")]
-    [InlineData("Checkout")]
-    [InlineData("Check In")]
-    [InlineData("Undo Checkout")]
-    [InlineData("Status")]
-    [InlineData("Where Used")]
-    public async Task Pdm_operations_are_declared_but_throw_NotImplemented_not_a_fake_success(string _)
+    [Fact]
+    public async Task Pdm_WRITE_operations_are_declared_but_throw_NotImplemented_not_a_fake_success()
     {
         var client = Client(FakeHttpHandler.Always(HttpStatusCode.OK, "{}"));
         var s = FakeSession();
 
-        await Assert.ThrowsAsync<ArchApiException>(() => client.GetLatestAsync(s, "doc1", @"C:\ws"));
+        // P4C write operations - still declared-not-implemented, never faked.
         await Assert.ThrowsAsync<ArchApiException>(() => client.CheckoutAsync(s, "doc1"));
         await Assert.ThrowsAsync<ArchApiException>(() => client.CheckInAsync(s, "doc1", @"C:\ws\a.ipt"));
         await Assert.ThrowsAsync<ArchApiException>(() => client.UndoCheckoutAsync(s, "doc1"));
         await Assert.ThrowsAsync<ArchApiException>(() => client.GetDocumentStatusAsync(s, "doc1"));
         await Assert.ThrowsAsync<ArchApiException>(() => client.GetWhereUsedAsync(s, "doc1"));
 
-        var ex = await Assert.ThrowsAsync<ArchApiException>(() => client.GetLatestAsync(s, "doc1", @"C:\ws"));
+        var ex = await Assert.ThrowsAsync<ArchApiException>(() => client.CheckoutAsync(s, "doc1"));
         Assert.Equal(ArchApiFailureKind.NotImplemented, ex.Kind);
     }
 

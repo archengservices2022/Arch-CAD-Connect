@@ -3,8 +3,8 @@ namespace Arch.CadConnect.Core.Ribbon;
 /// <summary>
 /// Every ribbon button the add-in defines. Split into two groups:
 ///
-///   * <see cref="IsImplementedInP4A"/> == true  - the CONNECTION commands,
-///     which actually do something in this milestone;
+///   * <see cref="IsImplemented"/> == true  - the command actually performs a
+///     real operation (CONNECTION commands since P4A; Get Latest since P4B);
 ///   * everything else - declared so the ribbon is complete, but wired to a
 ///     handler that tells the user the operation is not implemented yet. The
 ///     add-in NEVER reports a fake successful PDM result.
@@ -16,7 +16,7 @@ public enum ArchCommand
     SignOut,
     ServerStatus,
 
-    // PDM panel (P4B / P4C)
+    // PDM panel  (Get Latest: P4B; the rest: P4C)
     GetLatest,
     Checkout,
     CheckIn,
@@ -37,11 +37,14 @@ public static class ArchCommands
     /// <summary>The ribbon tab label.</summary>
     public const string RibbonTabName = "ARCH ENGINEERING";
 
-    public static bool IsImplementedInP4A(this ArchCommand command) => command switch
+    /// <summary>True when the command performs a real operation today (vs.
+    ///  "declared but not implemented yet").</summary>
+    public static bool IsImplemented(this ArchCommand command) => command switch
     {
         ArchCommand.SignIn => true,
         ArchCommand.SignOut => true,
         ArchCommand.ServerStatus => true,
+        ArchCommand.GetLatest => true, // P4B
         _ => false,
     };
 
@@ -90,15 +93,16 @@ public static class ArchCommands
     };
 
     public static string ToolTip(this ArchCommand command) =>
-        command.IsImplementedInP4A()
+        command.IsImplemented()
             ? command switch
             {
                 ArchCommand.SignIn => "Sign in to an Arch PLM server.",
                 ArchCommand.SignOut => "Sign out and revoke this machine's session.",
                 ArchCommand.ServerStatus => "Check the Arch PLM connection.",
+                ArchCommand.GetLatest => "Download the latest version of a managed CAD document and its dependencies into a local workspace.",
                 _ => command.DisplayName(),
             }
-            : $"{command.DisplayName()} is not available in this milestone (P4A foundation). Coming in a later release.";
+            : $"{command.DisplayName()} is not available yet. Coming in a later release.";
 
     /// <summary>Deterministic panel order.</summary>
     public static readonly IReadOnlyList<string> PanelOrder = new[] { "CONNECTION", "PDM", "INFORMATION" };

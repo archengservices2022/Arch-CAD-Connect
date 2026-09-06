@@ -75,12 +75,13 @@ internal sealed class SignInDialog : Form
         SetBusy(true);
         _status.Text = string.Empty;
 
-        // Remember the non-secret preferences (address + email).
-        new ConnectSettings
+        // Remember the non-secret preferences (address + email), keeping any
+        // other stored preference (e.g. the last workspace root) intact.
+        (ConnectSettings.Load() with
         {
             ServerAddress = _server.Text.Trim(),
             LastEmail = _email.Text.Trim(),
-        }.Save();
+        }).Save();
 
         try
         {
