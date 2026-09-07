@@ -59,9 +59,27 @@ public static class RibbonCommandPolicy
                 && (CheckoutStateMachine.CanUndo(document.CheckoutState, userRole)
                     || (hasRememberedUndoTarget && CheckoutStateMachine.IsWriteRole(userRole))),
 
+            // P5A: a READ-ONLY scan of the references Inventor already knows
+            // about. Needs a live connection and a saved, supported CAD
+            // document open. Deliberately NOT role-gated - it observes, it
+            // never mutates, so VIEWER is allowed. It does NOT require a
+            // checkout or a managed-workspace binding.
+            ArchCommand.ScanReferences => connection == ConnectionState.Connected
+                && IsScannableDocument(document),
+
             _ => false,
         };
     }
+
+    /// <summary>Supported P5A scan roots: an Inventor assembly, part or
+    ///  drawing that exists on disk. Managed status is irrelevant - an
+    ///  unmanaged document still has references worth reporting.</summary>
+    private static bool IsScannableDocument(CadDocumentContext document) =>
+        document.HasBeenSavedToDisk
+        && document.DocumentType is CadDocumentType.Iam
+            or CadDocumentType.Ipt
+            or CadDocumentType.Idw
+            or CadDocumentType.Dwg;
 
     /// <summary>
     /// The enablement of EVERY command for a given state, ready to apply to the

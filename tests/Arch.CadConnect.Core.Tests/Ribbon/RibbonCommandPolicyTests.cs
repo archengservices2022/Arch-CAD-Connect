@@ -86,6 +86,76 @@ public class RibbonCommandPolicyTests
         }
     }
 
+    // ---- P5A: Scan References ---------------------------------------
+
+    private static CadDocumentContext ScannableDoc(CadDocumentType type = CadDocumentType.Iam) =>
+        CadDocumentContext.Create(@"C:\work\proj\housing" + Ext(type), displayNameFallback: null, isDirty: false);
+
+    private static string Ext(CadDocumentType t) => t switch
+    {
+        CadDocumentType.Iam => ".iam",
+        CadDocumentType.Idw => ".idw",
+        CadDocumentType.Dwg => ".dwg",
+        _ => ".ipt",
+    };
+
+    [Theory]
+    [InlineData(ConnectionState.SignedOut, false)]
+    [InlineData(ConnectionState.Connecting, false)]
+    [InlineData(ConnectionState.Connected, true)]
+    [InlineData(ConnectionState.Unauthorized, false)]
+    [InlineData(ConnectionState.ServerUnavailable, false)]
+    public void ScanReferences_is_enabled_only_when_connected_with_a_saved_supported_doc(
+        ConnectionState state, bool expected)
+    {
+        Assert.Equal(expected,
+            RibbonCommandPolicy.IsEnabled(ArchCommand.ScanReferences, state, ScannableDoc(), userRole: "ENGINEER"));
+    }
+
+    [Theory]
+    [InlineData(CadDocumentType.Iam)]
+    [InlineData(CadDocumentType.Ipt)]
+    [InlineData(CadDocumentType.Idw)]
+    [InlineData(CadDocumentType.Dwg)]
+    public void ScanReferences_supports_every_inventor_cad_document_type(CadDocumentType type)
+    {
+        Assert.True(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.ScanReferences, ConnectionState.Connected, ScannableDoc(type), "ENGINEER"));
+    }
+
+    [Fact]
+    public void ScanReferences_is_available_to_a_VIEWER_it_is_read_only()
+    {
+        Assert.True(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.ScanReferences, ConnectionState.Connected, ScannableDoc(), userRole: "VIEWER"));
+        Assert.True(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.ScanReferences, ConnectionState.Connected, ScannableDoc(), userRole: null));
+    }
+
+    [Fact]
+    public void ScanReferences_needs_a_document_that_exists_on_disk()
+    {
+        Assert.False(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.ScanReferences, ConnectionState.Connected, NoDoc, "ENGINEER"));
+
+        var neverSaved = CadDocumentContext.Create(fullPath: null, displayNameFallback: "Assembly1", isDirty: true);
+        Assert.False(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.ScanReferences, ConnectionState.Connected, neverSaved, "ENGINEER"));
+    }
+
+    [Fact]
+    public void Running_a_scan_does_not_enable_any_mutation_command()
+    {
+        // An unmanaged (scannable) doc: Scan is on, every PDM mutation is off.
+        var doc = ScannableDoc();
+        var map = RibbonCommandPolicy.Evaluate(ConnectionState.Connected, doc, "ENGINEER");
+
+        Assert.True(map[ArchCommand.ScanReferences]);
+        Assert.False(map[ArchCommand.Checkout]);
+        Assert.False(map[ArchCommand.CheckIn]);
+        Assert.False(map[ArchCommand.UndoCheckout]);
+    }
+
     [Theory]
     [InlineData(ArchCommand.Status)]
     [InlineData(ArchCommand.Version)]

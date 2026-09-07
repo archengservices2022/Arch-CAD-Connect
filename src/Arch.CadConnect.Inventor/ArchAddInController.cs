@@ -5,10 +5,12 @@ using Arch.CadConnect.Api.Workspace;
 using Arch.CadConnect.Core;
 using Arch.CadConnect.Core.Connection;
 using Arch.CadConnect.Core.Documents;
+using Arch.CadConnect.Core.References;
 using Arch.CadConnect.Core.Ribbon;
 using Arch.CadConnect.Core.Session;
 using Arch.CadConnect.Core.Workspace;
 using Arch.CadConnect.Inventor.Documents;
+using Arch.CadConnect.Inventor.References;
 using Arch.CadConnect.Inventor.Ribbon;
 using Arch.CadConnect.Inventor.Ui;
 
@@ -163,6 +165,10 @@ internal sealed class ArchAddInController : IDisposable
                 RunUndoCheckout();
                 break;
 
+            case ArchCommand.ScanReferences:
+                RunScanReferences();
+                break;
+
             default:
                 // Never fake a PDM result. Say plainly it is not built yet.
                 Info($"'{command.DisplayName()}' is not available yet. Coming in a later release.");
@@ -299,6 +305,50 @@ internal sealed class ArchAddInController : IDisposable
             return (target.File, target.DocumentNumber);
         }
         return (null, "");
+    }
+
+    // ---- P5A: read-only reference scan ------------------------------
+
+    /// <summary>
+    /// Report the references Inventor knows about for the active document.
+    /// Purely observational: it reads <c>ReferencedDocumentDescriptors</c> and
+    /// the local workspace manifest, and shows a text report. It never opens,
+    /// activates, saves, or repairs any document, and never touches the server.
+    /// COM reads run inline on the UI thread (this handler is already on it);
+    /// a local metadata scan needs no background work.
+    /// </summary>
+    private void RunScanReferences()
+    {
+        var doc = _tracker.Current;
+        if (string.IsNullOrEmpty(doc.FullPath) || !doc.HasBeenSavedToDisk)
+        {
+            Info("Open and save an assembly, part or drawing before scanning its references.");
+            return;
+        }
+        if (doc.DocumentType is not (CadDocumentType.Iam or CadDocumentType.Ipt
+            or CadDocumentType.Idw or CadDocumentType.Dwg))
+        {
+            Info("Scan References supports Inventor assemblies (.iam), parts (.ipt) and drawings (.idw / .dwg).");
+            return;
+        }
+
+        CadReferenceScan scan;
+        try
+        {
+            var scanner = new InventorReferenceScanner(_application, KnownWorkspaceRoots());
+            scan = scanner.Scan(doc.FullPath!);
+        }
+        catch (Exception)
+        {
+            Error("The reference scan could not be completed.");
+            return;
+        }
+
+        var report = CadReferenceScanTextReport.Render(scan);
+        var status = scan.IsComplete ? "COMPLETE" : "PARTIAL";
+        using var dialog = new ScanResultDialog(
+            $"{ArchAddInInfo.DisplayName} - Scan References ({status})", report);
+        dialog.ShowDialog(new Win32Owner(SafeMainHwnd()));
     }
 
     private void ShowGetLatestDialog()
