@@ -35,6 +35,11 @@ internal sealed class ArchAddInController : IDisposable
     private readonly RibbonFactory _ribbon;
     private readonly InventorDocumentObserver _documents;
 
+    /// <summary>P4C: the most-recently-active exact checkout target, kept so
+    ///  Undo stays reachable after its document is closed. Re-validated on
+    ///  every ribbon refresh; the destructive path re-checks it fully.</summary>
+    private readonly UndoTargetMemory _undoTarget = new();
+
     private bool _disposed;
 
     public ArchAddInController(InventorApi.Application application)
@@ -49,11 +54,20 @@ internal sealed class ArchAddInController : IDisposable
             {
                 ClientLabel = ClientLabel(),
                 Timeout = TimeSpan.FromSeconds(30),
+                EditorProbe = new InventorEditorDocumentProbe(_application),
             }),
             store: new DpapiSessionStore());
 
         _connection.StateChanged += _ => OnUi(RefreshEnablement);
-        _connection.SessionChanged += _ => OnUi(RefreshEnablement);
+        _connection.SessionChanged += session => OnUi(() =>
+        {
+            // Sign-out (null session) forgets any remembered Undo target.
+            if (session is null)
+            {
+                _undoTarget.Clear();
+            }
+            RefreshEnablement();
+        });
 
         _ribbon = new RibbonFactory(_application);
         _ribbon.CommandInvoked += OnCommandInvoked;
@@ -72,8 +86,46 @@ internal sealed class ArchAddInController : IDisposable
 
     private void RefreshEnablement()
     {
-        var map = RibbonCommandPolicy.Evaluate(_connection.State, _tracker.Current);
+        var role = _connection.CurrentSession?.Identity.Role;
+        var doc = _tracker.Current;
+
+        // P4C: remember an exact checked-out target while it is active, and
+        // drop it the moment it is no longer a live checkout in the current
+        // workspace (successful check-in / undo clear the manifest marker;
+        // a workspace change / identity drift / missing file also invalidate).
+        _undoTarget.Observe(doc);
+        _undoTarget.Revalidate(
+            entryLookup: LoadManifestEntry,
+            fileExists: SafeFileExists,
+            currentWorkspaceRoot: SafeLastWorkspaceRoot());
+
+        var map = RibbonCommandPolicy.Evaluate(
+            _connection.State, doc, role, hasRememberedUndoTarget: _undoTarget.Current is not null);
         _ribbon.ApplyEnablement(map);
+    }
+
+    private static WorkspaceManifestEntry? LoadManifestEntry(ManagedFileRef file)
+    {
+        try
+        {
+            return WorkspaceManifest.LoadOrEmpty(file.WorkspaceRoot).FindByAbsolutePath(file.AbsoluteFilePath);
+        }
+        catch (Exception ex) when (ex is IOException or WorkspaceRootException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    private static bool SafeFileExists(string path)
+    {
+        try { return !string.IsNullOrEmpty(path) && File.Exists(path); }
+        catch { return false; }
+    }
+
+    private static string? SafeLastWorkspaceRoot()
+    {
+        try { return ConnectSettings.Load().LastWorkspaceRoot; }
+        catch { return null; }
     }
 
     private void OnCommandInvoked(ArchCommand command)
@@ -99,11 +151,154 @@ internal sealed class ArchAddInController : IDisposable
                 ShowGetLatestDialog();
                 break;
 
+            case ArchCommand.Checkout:
+                RunCheckout();
+                break;
+
+            case ArchCommand.CheckIn:
+                RunCheckIn();
+                break;
+
+            case ArchCommand.UndoCheckout:
+                RunUndoCheckout();
+                break;
+
             default:
                 // Never fake a PDM result. Say plainly it is not built yet.
                 Info($"'{command.DisplayName()}' is not available yet. Coming in a later release.");
                 break;
         }
+    }
+
+    // ---- P4C: checkout / check-in / undo ----------------------------
+
+    /// <summary>The active document as an exact managed-file reference, or null
+    ///  (with a shown message) when it is not eligible.</summary>
+    private ManagedFileRef? ActiveManagedFile()
+    {
+        var doc = _tracker.Current;
+        if (doc.PlmIdentity is null || string.IsNullOrEmpty(doc.FullPath) || string.IsNullOrEmpty(doc.WorkspaceRoot))
+        {
+            Info("The active document is not a managed CAD document in a known workspace. Run Get Latest first.");
+            return null;
+        }
+        return ManagedFileRef.Create(doc.WorkspaceRoot!, doc.FullPath!);
+    }
+
+    private void RunCheckout()
+    {
+        var file = ActiveManagedFile();
+        if (file is null) return;
+
+        CheckoutOperationResult? result = null;
+        RunBackground(
+            async ct => result = await _connection.CheckoutAsync(file, ct),
+            "Checking out",
+            onDone: () =>
+            {
+                if (result is not null)
+                {
+                    if (result.ReconcileNeeded) Error(result.Message); else Info(result.Message);
+                }
+            },
+            onSettled: RefreshAfterOperation,
+            timeout: TimeSpan.FromMinutes(2));
+    }
+
+    private void RunCheckIn()
+    {
+        var file = ActiveManagedFile();
+        if (file is null) return;
+
+        if (!_tracker.Current.IsSaved)
+        {
+            Info("Save the document in Inventor before checking it in.");
+            return;
+        }
+
+        var confirm = MessageBox.Show(
+            new Win32Owner(SafeMainHwnd()),
+            "Upload the saved local file as a new version and release your checkout?",
+            ArchAddInInfo.DisplayName, MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
+        if (confirm != DialogResult.OK) return;
+
+        CheckInOperationResult? result = null;
+        RunBackground(
+            async ct => result = await _connection.CheckInAsync(file, ct),
+            "Checking in",
+            onDone: () =>
+            {
+                if (result is not null)
+                {
+                    if (result.Verified) Info(result.Message); else Error(result.Message);
+                }
+            },
+            onSettled: RefreshAfterOperation,
+            timeout: TimeSpan.FromMinutes(15));
+    }
+
+    private void RunUndoCheckout()
+    {
+        var (file, label) = ResolveUndoTarget();
+        if (file is null)
+        {
+            Info("There is no checked-out managed document to undo. Open the checked-out file, then try again.");
+            return;
+        }
+
+        var confirm = MessageBox.Show(
+            new Win32Owner(SafeMainHwnd()),
+            $"Undo Checkout of \"{label}\" will DISCARD your local changes and restore the checked-out version. Continue?",
+            ArchAddInInfo.DisplayName, MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
+        if (confirm != DialogResult.OK) return;
+
+        UndoOperationResult? result = null;
+        RunBackground(
+            async ct => result = await _connection.UndoCheckoutAsync(file, reason: null, ct),
+            "Undoing checkout",
+            onDone: () =>
+            {
+                if (result is not null)
+                {
+                    if (result.Restored) Info(result.Message); else Error(result.Message);
+                }
+            },
+            onSettled: RefreshAfterOperation,
+            timeout: TimeSpan.FromMinutes(15));
+    }
+
+    /// <summary>Re-derive the active document and re-evaluate the ribbon after
+    ///  any P4C operation (success OR failure). The manifest may have changed -
+    ///  a released checkout marker, an Unverified downgrade - and
+    ///  <see cref="RefreshEnablement"/> revalidates the remembered Undo target.</summary>
+    private void RefreshAfterOperation()
+    {
+        try { _documents.RefreshFromActiveDocument(); } catch { /* COM teardown */ }
+        RefreshEnablement();
+    }
+
+    /// <summary>
+    /// The file Undo should act on: the active document if it is a managed file
+    /// this session holds checked out; otherwise the most-recently-active
+    /// remembered checkout target (so close-then-undo works). Never a filename
+    /// guess - both come from an exact verified manifest binding, and the
+    /// orchestrator re-checks identity + server state before acting.
+    /// </summary>
+    private (ManagedFileRef? File, string Label) ResolveUndoTarget()
+    {
+        var doc = _tracker.Current;
+        if (doc.CheckoutState == LocalCheckoutState.CheckedOutByMe
+            && doc.PlmIdentity is { } id
+            && !string.IsNullOrEmpty(doc.FullPath) && !string.IsNullOrEmpty(doc.WorkspaceRoot))
+        {
+            return (ManagedFileRef.Create(doc.WorkspaceRoot!, doc.FullPath!),
+                string.IsNullOrEmpty(id.DocumentNumber) ? id.CadDocumentId : id.DocumentNumber!);
+        }
+        if (_undoTarget.Current is { } target)
+        {
+            return (target.File, target.DocumentNumber);
+        }
+        return (null, "");
     }
 
     private void ShowGetLatestDialog()
@@ -232,6 +427,7 @@ internal sealed class ArchAddInController : IDisposable
         Func<CancellationToken, Task> work,
         string? title,
         Action? onDone = null,
+        Action? onSettled = null,
         TimeSpan? timeout = null)
     {
         _ = Task.Run(async () =>
@@ -248,6 +444,51 @@ internal sealed class ArchAddInController : IDisposable
             catch (ArchApiException ex)
             {
                 OnUi(() => Error(ex.Message));
+            }
+            catch (CheckoutConflictException ex)
+            {
+                OnUi(() => Error(ex.Message));
+            }
+            catch (NotManagedException ex)
+            {
+                OnUi(() => Info(ex.Message));
+            }
+            catch (NotVerifiedException ex)
+            {
+                OnUi(() => Info(ex.Message));
+            }
+            catch (NotCheckedOutLocallyException ex)
+            {
+                OnUi(() => Info(ex.Message));
+            }
+            catch (StaleCheckoutException ex)
+            {
+                OnUi(() => Error(ex.Message));
+            }
+            catch (DocumentOpenException ex)
+            {
+                OnUi(() => Error(ex.Message));
+            }
+            catch (UndoTargetMissingException ex)
+            {
+                OnUi(() => Error(ex.Message));
+            }
+            catch (RestoreVerificationException ex)
+            {
+                OnUi(() => Error("Undo Checkout was NOT performed - the base version could not be verified for restore. "
+                    + "Your checkout is still active. (" + ex.Message + ")"));
+            }
+            catch (ContentDownloadRedirectException)
+            {
+                OnUi(() => Error("The server redirected a download request; refusing to follow. Your checkout is unchanged."));
+            }
+            catch (ContentDownloadHttpException ex)
+            {
+                OnUi(() => Error($"A download failed (HTTP {ex.Status}). Your checkout is unchanged."));
+            }
+            catch (ContentDownloadTimeoutException)
+            {
+                OnUi(() => Error("A download timed out. Your checkout is unchanged."));
             }
             catch (ArchServerUriException ex)
             {
@@ -275,6 +516,13 @@ internal sealed class ArchAddInController : IDisposable
             catch (Exception)
             {
                 OnUi(() => Error("Something went wrong. Please try again."));
+            }
+            finally
+            {
+                if (onSettled is not null)
+                {
+                    OnUi(onSettled);
+                }
             }
         });
     }

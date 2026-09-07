@@ -16,7 +16,13 @@ public class GetLatestOrchestratorTests : IDisposable
 
     public void Dispose()
     {
-        try { Directory.Delete(_root, recursive: true); } catch { /* best effort */ }
+        try
+        {
+            foreach (var f in Directory.GetFiles(_root, "*", SearchOption.AllDirectories))
+                File.SetAttributes(f, FileAttributes.Normal);
+            Directory.Delete(_root, recursive: true);
+        }
+        catch { /* best effort */ }
     }
 
     private static readonly byte[] AsmBytes = Encoding.UTF8.GetBytes("assembly-payload-1");
@@ -189,9 +195,12 @@ public class GetLatestOrchestratorTests : IDisposable
         var request = new GetLatestRequest { Root = CadDocumentLookup.ByNumber("ASM-1"), WorkspaceRoot = _root };
         await Orchestrator(http).RunAsync(WorkspaceTestSession.Make(), request);
 
-        // user edits part.ipt
+        // user checks out (clears the P4C read-only guard) and edits part.ipt
+        var partPath = Path.Combine(_root, "part.ipt");
+        Assert.True((File.GetAttributes(partPath) & FileAttributes.ReadOnly) != 0); // Get Latest left it controlled
+        File.SetAttributes(partPath, FileAttributes.Normal);
         var edited = Encoding.UTF8.GetBytes("user edits");
-        await File.WriteAllBytesAsync(Path.Combine(_root, "part.ipt"), edited);
+        await File.WriteAllBytesAsync(partPath, edited);
 
         var report = await Orchestrator(new HttpClient(ServerHandler())).RunAsync(WorkspaceTestSession.Make(), request);
 

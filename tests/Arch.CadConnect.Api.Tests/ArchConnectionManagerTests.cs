@@ -44,9 +44,9 @@ public class ArchConnectionManagerTests
         public Task<ResolvedCadDocument> ResolveCadDocumentAsync(IArchSession s, CadDocumentLookup lu, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Resolve");
         public Task<MaterializationReport> GetLatestAsync(IArchSession s, GetLatestRequest r, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Get Latest");
         public Task<PlmDocumentStatusDto> GetDocumentStatusAsync(IArchSession s, string id, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Status");
-        public Task CheckoutAsync(IArchSession s, string id, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Checkout");
-        public Task CheckInAsync(IArchSession s, string id, string p, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Check In");
-        public Task UndoCheckoutAsync(IArchSession s, string id, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Undo Checkout");
+        public Task<Arch.CadConnect.Api.Workspace.CheckoutOperationResult> CheckoutAsync(IArchSession s, ManagedFileRef f, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Checkout");
+        public Task<Arch.CadConnect.Api.Workspace.CheckInOperationResult> CheckInAsync(IArchSession s, ManagedFileRef f, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Check In");
+        public Task<Arch.CadConnect.Api.Workspace.UndoOperationResult> UndoCheckoutAsync(IArchSession s, ManagedFileRef f, string? reason, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Undo Checkout");
         public Task<WhereUsedDto> GetWhereUsedAsync(IArchSession s, string id, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Where Used");
         public Task<ReleaseInfoDto> GetReleaseInfoAsync(IArchSession s, string r, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Release information");
     }

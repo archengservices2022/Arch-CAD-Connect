@@ -98,7 +98,25 @@ internal static class DocumentContextFactory
             binding = null;
         }
 
-        return binding is null ? context : context with { PlmIdentity = binding.Identity };
+        if (binding is null)
+        {
+            return context;
+        }
+
+        var fileExists = SafeFileExists(context.FullPath);
+        return context with
+        {
+            PlmIdentity = binding.Identity,
+            CheckoutState = CheckoutStateMachine.Evaluate(binding.Entry, fileExists, serverStatus: null),
+            CheckoutBinding = binding.Entry.Checkout,
+            WorkspaceRoot = binding.WorkspaceRoot,
+        };
+    }
+
+    private static bool SafeFileExists(string? path)
+    {
+        try { return !string.IsNullOrEmpty(path) && File.Exists(path); }
+        catch { return false; }
     }
 
     private static T? TryGet<T>(Func<T?> read)

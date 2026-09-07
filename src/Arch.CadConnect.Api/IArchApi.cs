@@ -1,4 +1,5 @@
 using Arch.CadConnect.Api.Dtos;
+using Arch.CadConnect.Api.Workspace;
 using Arch.CadConnect.Core.Session;
 using Arch.CadConnect.Core.Workspace;
 
@@ -16,10 +17,13 @@ namespace Arch.CadConnect.Api;
 /// <see cref="GetLatestAsync"/> (real, via the existing P3B workspace-plan +
 /// content endpoints, bearer-authenticated).
 ///
-/// P4C: the write operations below are declared but every implementation
-/// throws <see cref="ArchApiException"/> with
-/// <see cref="ArchApiFailureKind.NotImplemented"/> - the client never fakes a
-/// successful PDM result.
+/// P4C IMPLEMENTS: <see cref="CheckoutAsync"/>, <see cref="CheckInAsync"/>,
+/// <see cref="UndoCheckoutAsync"/> (real, via the existing P3C checkout /
+/// check-in / undo endpoints, bearer-authenticated). Each acts on an EXACT
+/// manifest-bound local file; the entry's cadDocumentId is authoritative.
+///
+/// Still declared-not-implemented (future scope): document status / version /
+/// revision / where-used.
 /// </summary>
 public interface IArchApi
 {
@@ -68,15 +72,41 @@ public interface IArchApi
     /// </summary>
     Task<MaterializationReport> GetLatestAsync(IArchSession session, GetLatestRequest request, CancellationToken ct = default);
 
-    // ---- PDM write operations (declared for P4C; not implemented yet) ----
+    // ---- PDM checkout / check-in / undo (P4C) --------------------------
+
+    /// <summary>
+    /// Take an exclusive server checkout of the managed file at
+    /// <paramref name="file"/> and make its local copy writable. The file must
+    /// be bound in the verified workspace manifest and Verified. Throws
+    /// <see cref="Workspace.CheckoutConflictException"/> when another user holds
+    /// it, <see cref="Workspace.NotManagedException"/> /
+    /// <see cref="Workspace.NotVerifiedException"/> for an ineligible target.
+    /// If the server succeeds but the local update partially fails, the result
+    /// carries <c>ReconcileNeeded</c> - it NEVER reports the checkout as failed.
+    /// </summary>
+    Task<CheckoutOperationResult> CheckoutAsync(IArchSession session, ManagedFileRef file, CancellationToken ct = default);
+
+    /// <summary>
+    /// Upload the saved local file as the next immutable FileVersion and
+    /// release the checkout, then rebind the workspace manifest and set the
+    /// file read-only. Creates a FileVersion ONLY - never an Engineering
+    /// Revision. A pre-201 failure leaves the checkout and the writable file
+    /// untouched; a 201 whose bytes cannot be verified returns
+    /// <c>Verified == false</c> (manifest rebound as Unverified).
+    /// </summary>
+    Task<CheckInOperationResult> CheckInAsync(IArchSession session, ManagedFileRef file, CancellationToken ct = default);
+
+    /// <summary>
+    /// Release the checkout and restore the working file to the exact base
+    /// FileVersion (discarding local changes). The base version is downloaded
+    /// and fully verified WHILE the checkout is still held - a bad download
+    /// throws and the checkout is NEVER released.
+    /// </summary>
+    Task<UndoOperationResult> UndoCheckoutAsync(IArchSession session, ManagedFileRef file, string? reason, CancellationToken ct = default);
+
+    // ---- future scope (declared, not implemented) ---------------------
 
     Task<PlmDocumentStatusDto> GetDocumentStatusAsync(IArchSession session, string cadDocumentId, CancellationToken ct = default);
-
-    Task CheckoutAsync(IArchSession session, string cadDocumentId, CancellationToken ct = default);
-
-    Task CheckInAsync(IArchSession session, string cadDocumentId, string localFilePath, CancellationToken ct = default);
-
-    Task UndoCheckoutAsync(IArchSession session, string cadDocumentId, CancellationToken ct = default);
 
     Task<WhereUsedDto> GetWhereUsedAsync(IArchSession session, string cadDocumentId, CancellationToken ct = default);
 

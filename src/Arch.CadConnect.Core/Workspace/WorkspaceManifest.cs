@@ -159,25 +159,35 @@ public sealed class WorkspaceManifest
         };
     }
 
-    /// <summary>Write the manifest atomically (temp file + replace). Best
-    ///  effort: a write failure leaves the on-disk files valid and the old
-    ///  manifest in place; it is rebuilt on the next successful run.</summary>
+    /// <summary>
+    /// Write the manifest atomically (temp file + replace). The on-disk files
+    /// stay valid whether or not this succeeds - the temp file is cleaned up
+    /// on failure and the previous manifest is left in place - but a failure
+    /// is now OBSERVABLE: it throws <see cref="WorkspaceManifestPersistException"/>
+    /// so a state-changing P4C operation can report that its local record was
+    /// not durably saved (the server remains authoritative; recovery is a
+    /// Get Latest).
+    /// </summary>
+    /// <exception cref="WorkspaceManifestPersistException">the temp write or
+    ///  the atomic replace failed (permissions, IO, the file held open, …).</exception>
     public void SaveAtomic()
     {
         var path = ManifestFilePath;
         var dir = Path.GetDirectoryName(path)!;
-        Directory.CreateDirectory(dir);
 
         var tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         var bytes = JsonSerializer.SerializeToUtf8Bytes(_doc, Json);
         try
         {
+            Directory.CreateDirectory(dir);
             File.WriteAllBytes(tmp, bytes);
             File.Move(tmp, path, overwrite: true);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             try { File.Delete(tmp); } catch { /* best effort */ }
+            throw new WorkspaceManifestPersistException(
+                $"Could not save the workspace manifest ({ex.GetType().Name}).", ex);
         }
     }
 
@@ -210,7 +220,105 @@ public sealed class WorkspaceManifest
         return null;
     }
 
+    // ---- P4C: checkout state (all mutate the matching entry ONLY, then
+    //      persist atomically; never create an entry - identity must come
+    //      from a prior Get Latest). Matched by exact absolute path, never by
+    //      filename. Return VALUE: true = an entry matched and was saved;
+    //      false = no entry matched (nothing written). THROWS
+    //      WorkspaceManifestPersistException when an entry matched but the
+    //      durable save failed - callers of a state-changing operation MUST
+    //      treat that as "local record not reconciled". -----------------
+
+    /// <summary>Record that THIS user holds the server checkout of the file at
+    ///  <paramref name="absoluteFilePath"/>. Snapshots the exact base
+    ///  FileVersion identity + checksum + size so Undo has an authoritative
+    ///  target even if the entry's own version fields later drift.</summary>
+    public bool MarkCheckedOut(string absoluteFilePath, WorkspaceCheckoutBinding binding)
+        => UpdateEntry(absoluteFilePath, e => e with { Checkout = binding });
+
+    /// <summary>Clear the local checkout marker (after a successful check-in or
+    ///  undo). Identity + version fields are untouched.</summary>
+    public bool ClearCheckout(string absoluteFilePath)
+        => UpdateEntry(absoluteFilePath, e => e with { Checkout = null });
+
+    /// <summary>After a verified check-in: point the entry at the NEW immutable
+    ///  FileVersion, mark it Verified, and clear the checkout marker.</summary>
+    public bool RebindToNewVersion(
+        string absoluteFilePath,
+        string fileVersionId,
+        int versionNumber,
+        string checksum,
+        long fileSize,
+        DateTimeOffset nowUtc,
+        WorkspaceManifestEntryState state = WorkspaceManifestEntryState.Verified)
+        => UpdateEntry(absoluteFilePath, e => e with
+        {
+            FileVersionId = fileVersionId,
+            VersionNumber = versionNumber,
+            Checksum = checksum,
+            FileSize = fileSize,
+            State = state,
+            RetrievedAtUtc = nowUtc,
+            Checkout = null,
+        });
+
+    /// <summary>Mark the entry Unverified: identity is kept, but the local
+    ///  file's current bytes are NOT a confirmed copy of the pinned version.
+    ///  Used when a materialize / restore could not be completed.</summary>
+    public bool MarkUnverified(string absoluteFilePath, bool clearCheckout = false)
+        => UpdateEntry(absoluteFilePath, e => e with
+        {
+            State = WorkspaceManifestEntryState.Unverified,
+            Checkout = clearCheckout ? null : e.Checkout,
+        });
+
+    private bool UpdateEntry(string absoluteFilePath, Func<WorkspaceManifestEntry, WorkspaceManifestEntry> mutate)
+    {
+        var target = FindByAbsolutePath(absoluteFilePath);
+        if (target is null)
+        {
+            return false;
+        }
+        var key = Key(target.RelativePath);
+        _doc = _doc with
+        {
+            Entries = _doc.Entries
+                .Select(e => string.Equals(Key(e.RelativePath), key, StringComparison.OrdinalIgnoreCase) ? mutate(e) : e)
+                .ToArray(),
+        };
+        SaveAtomic();
+        return true;
+    }
+
     private static string Key(string relativePath) => relativePath.Trim();
+}
+
+/// <summary>
+/// The workspace manifest could not be written durably (temp write, atomic
+/// replace, permissions, IO, the file held open, …). The on-disk files remain
+/// valid and the previous manifest is untouched; the SERVER stays
+/// authoritative and recovery is a Get Latest. Callers of a state-changing
+/// P4C operation must surface this as "local record not reconciled" - never
+/// as a false success.
+/// </summary>
+public sealed class WorkspaceManifestPersistException(string message, Exception? inner = null)
+    : Exception(message, inner);
+
+/// <summary>
+/// Local record that THIS client holds the server checkout of one managed
+/// file. It is a cache of server-authoritative state (the server
+/// <c>CadCheckout</c> row is the truth); it exists so the ribbon and Undo can
+/// work without a round-trip and so Undo knows the EXACT base FileVersion to
+/// restore. Never used as identity - the entry's <c>cadDocumentId</c> is.
+/// </summary>
+public sealed record WorkspaceCheckoutBinding
+{
+    [JsonPropertyName("checkoutId")] public string CheckoutId { get; init; } = "";
+    [JsonPropertyName("baseFileVersionId")] public string BaseFileVersionId { get; init; } = "";
+    [JsonPropertyName("baseVersionNumber")] public int BaseVersionNumber { get; init; }
+    [JsonPropertyName("baseChecksum")] public string BaseChecksum { get; init; } = "";
+    [JsonPropertyName("baseFileSize")] public long BaseFileSize { get; init; }
+    [JsonPropertyName("checkedOutAtUtc")] public DateTimeOffset CheckedOutAtUtc { get; init; }
 }
 
 public sealed record WorkspaceManifestRunContext(
@@ -263,6 +371,13 @@ public sealed record WorkspaceManifestEntry
     public WorkspaceManifestEntryState State { get; init; } = WorkspaceManifestEntryState.Verified;
 
     [JsonPropertyName("retrievedAtUtc")] public DateTimeOffset RetrievedAtUtc { get; init; }
+
+    /// <summary>P4C: present only while THIS client holds the server checkout
+    ///  of this file. Absent in every P4B-era manifest and in the normal
+    ///  "controlled" state - JSON omits it when null.</summary>
+    [JsonPropertyName("checkout")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public WorkspaceCheckoutBinding? Checkout { get; init; }
 
     /// <summary>Project to the COM-free identity type used by
     ///  <c>CadDocumentContext</c>.</summary>

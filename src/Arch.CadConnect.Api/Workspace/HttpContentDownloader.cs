@@ -66,6 +66,16 @@ public sealed class HttpContentDownloader : IContentDownloader
     }
 
     public async Task<Stream> OpenContentStreamAsync(string contentPath, CancellationToken ct = default)
+        => (await OpenContentWithMetadataAsync(contentPath, ct).ConfigureAwait(false)).Body;
+
+    /// <summary>
+    /// Like <see cref="OpenContentStreamAsync"/> but also surfaces the
+    /// server-declared integrity metadata: the <c>X-Content-SHA256</c> header
+    /// (the checksum the server itself verified before serving) and the
+    /// <c>Content-Length</c>. Used by the Undo restore, which stages + verifies
+    /// the base FileVersion BEFORE the server checkout is released.
+    /// </summary>
+    public async Task<ContentDownload> OpenContentWithMetadataAsync(string contentPath, CancellationToken ct = default)
     {
         if (string.IsNullOrEmpty(contentPath) || !ContentPathShape.IsMatch(contentPath))
         {
@@ -125,8 +135,16 @@ public sealed class HttpContentDownloader : IContentDownloader
                 throw new ContentDownloadHttpException((int)response.StatusCode);
             }
 
+            string? serverSha = null;
+            if (response.Headers.TryGetValues("X-Content-SHA256", out var shaValues))
+            {
+                serverSha = shaValues.FirstOrDefault()?.Trim();
+            }
+            var declaredLength = response.Content.Headers.ContentLength;
+
             var inner = await response.Content.ReadAsStreamAsync(cts.Token).ConfigureAwait(false);
-            return new TimeoutOwningStream(inner, response, cts, _options.TransferTimeout);
+            var body = new TimeoutOwningStream(inner, response, cts, _options.TransferTimeout);
+            return new ContentDownload(body, string.IsNullOrEmpty(serverSha) ? null : serverSha, declaredLength);
         }
         catch
         {
@@ -191,6 +209,10 @@ public sealed class HttpContentDownloader : IContentDownloader
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }
+
+/// <summary>A content-endpoint response: the streamed body plus the server's
+///  own declared integrity metadata.</summary>
+public sealed record ContentDownload(Stream Body, string? ServerSha256, long? DeclaredLength);
 
 public sealed class DownloadOptions
 {

@@ -13,7 +13,13 @@ public class WorkspaceMaterializerTests : IDisposable
 
     public void Dispose()
     {
-        try { Directory.Delete(_root, recursive: true); } catch { /* best effort */ }
+        try
+        {
+            foreach (var f in Directory.GetFiles(_root, "*", SearchOption.AllDirectories))
+                File.SetAttributes(f, FileAttributes.Normal);
+            Directory.Delete(_root, recursive: true);
+        }
+        catch { /* best effort */ }
     }
 
     private static WorkspacePlanEntry Entry(string cad, string rel, string fv, byte[] bytes, bool isRoot = false) => new()
@@ -63,6 +69,10 @@ public class WorkspaceMaterializerTests : IDisposable
         Assert.Equal(a, await File.ReadAllBytesAsync(Path.Combine(_root, "asm.iam")));
         Assert.Equal(b, await File.ReadAllBytesAsync(Path.Combine(_root, "part.ipt")));
         Assert.Equal(FakeContentDownloader.Sha256Hex(a), report.Results.Single(r => r.RelativePath == "asm.iam").Checksum);
+
+        // P4C: verified managed files are left "controlled" (read-only).
+        Assert.True(Arch.CadConnect.Core.Files.ManagedFileGuard.IsControlled(Path.Combine(_root, "asm.iam")));
+        Assert.True(Arch.CadConnect.Core.Files.ManagedFileGuard.IsControlled(Path.Combine(_root, "part.ipt")));
     }
 
     [Fact]

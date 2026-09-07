@@ -85,9 +85,12 @@ public sealed class GetLatestOrchestrator
                 _clock());
             manifest.SaveAtomic();
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or WorkspaceManifestPersistException)
         {
-            // The on-disk files are valid; the manifest is rebuilt next run.
+            // Get Latest is non-destructive: the on-disk files are valid and
+            // the manifest is rebuilt on the next successful run. (P4C's
+            // state-changing operations do NOT swallow this - see
+            // CheckoutOrchestrator.)
         }
 
         return report;

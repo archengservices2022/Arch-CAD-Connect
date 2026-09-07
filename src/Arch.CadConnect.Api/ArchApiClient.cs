@@ -20,6 +20,12 @@ public sealed class ArchApiClientOptions
     /// recognize it later ("Inventor 2025 on WS-01"). Server sanitizes it.
     /// </summary>
     public string? ClientLabel { get; init; }
+
+    /// <summary>P4C: lets the Inventor layer supply an
+    ///  <see cref="Core.Documents.IEditorDocumentProbe"/> so Undo Checkout can
+    ///  refuse when the managed file is open in Inventor. Null (the default) =
+    ///  the filesystem exclusive-open probe only.</summary>
+    public Core.Documents.IEditorDocumentProbe? EditorProbe { get; init; }
 }
 
 /// <summary>
@@ -161,19 +167,36 @@ public sealed class ArchApiClient : IArchApi
         return orchestrator.RunAsync(session, request, ct);
     }
 
-    // ---- PDM write operations: declared, not implemented yet (P4C) -------
+    // ---- PDM checkout / check-in / undo (P4C) ------------------------
+
+    public Task<CheckoutOperationResult> CheckoutAsync(IArchSession session, ManagedFileRef file, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(file);
+        return Orchestrator(session).CheckoutAsync(file.WorkspaceRoot, file.AbsoluteFilePath, ct);
+    }
+
+    public Task<CheckInOperationResult> CheckInAsync(IArchSession session, ManagedFileRef file, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(file);
+        return Orchestrator(session).CheckInAsync(file.WorkspaceRoot, file.AbsoluteFilePath, ct);
+    }
+
+    public Task<UndoOperationResult> UndoCheckoutAsync(IArchSession session, ManagedFileRef file, string? reason, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(file);
+        return Orchestrator(session).UndoAsync(file.WorkspaceRoot, file.AbsoluteFilePath, reason, ct);
+    }
+
+    private CheckoutOrchestrator Orchestrator(IArchSession session) =>
+        new(Server, session, _http, _options.Timeout, clock: null, editorProbe: _options.EditorProbe);
+
+    // ---- future scope: declared, not implemented --------------------
 
     public Task<PlmDocumentStatusDto> GetDocumentStatusAsync(IArchSession s, string id, CancellationToken ct = default)
         => throw ArchApiException.NotImplemented("Status");
-
-    public Task CheckoutAsync(IArchSession s, string id, CancellationToken ct = default)
-        => throw ArchApiException.NotImplemented("Checkout");
-
-    public Task CheckInAsync(IArchSession s, string id, string localFilePath, CancellationToken ct = default)
-        => throw ArchApiException.NotImplemented("Check In");
-
-    public Task UndoCheckoutAsync(IArchSession s, string id, CancellationToken ct = default)
-        => throw ArchApiException.NotImplemented("Undo Checkout");
 
     public Task<WhereUsedDto> GetWhereUsedAsync(IArchSession s, string id, CancellationToken ct = default)
         => throw ArchApiException.NotImplemented("Where Used");

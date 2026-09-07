@@ -12,7 +12,11 @@ namespace Arch.CadConnect.Core.Workspace;
 /// </summary>
 public static class WorkspaceBindingResolver
 {
-    public sealed record Binding(PlmIdentity Identity, WorkspaceManifestEntryState State, string WorkspaceRoot);
+    public sealed record Binding(
+        PlmIdentity Identity,
+        WorkspaceManifestEntryState State,
+        string WorkspaceRoot,
+        WorkspaceManifestEntry Entry);
 
     /// <summary>
     /// Look up <paramref name="absoluteFilePath"/> across every root in
@@ -46,7 +50,7 @@ public static class WorkspaceBindingResolver
             var entry = manifest.FindByAbsolutePath(absoluteFilePath);
             if (entry is not null)
             {
-                return new Binding(entry.ToPlmIdentity(), entry.State, Path.GetFullPath(root));
+                return new Binding(entry.ToPlmIdentity(), entry.State, Path.GetFullPath(root), entry);
             }
         }
 

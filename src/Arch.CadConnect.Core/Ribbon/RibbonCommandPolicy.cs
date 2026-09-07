@@ -1,4 +1,5 @@
 using Arch.CadConnect.Core.Connection;
+using Arch.CadConnect.Core.Workspace;
 
 namespace Arch.CadConnect.Core.Ribbon;
 
@@ -15,7 +16,12 @@ namespace Arch.CadConnect.Core.Ribbon;
 /// </summary>
 public static class RibbonCommandPolicy
 {
-    public static bool IsEnabled(ArchCommand command, ConnectionState connection, CadDocumentContext document)
+    public static bool IsEnabled(
+        ArchCommand command,
+        ConnectionState connection,
+        CadDocumentContext document,
+        string? userRole = null,
+        bool hasRememberedUndoTarget = false)
     {
         // Not built yet -> visible but disabled, everywhere.
         if (!command.IsImplemented())
@@ -34,6 +40,25 @@ public static class RibbonCommandPolicy
             // live connection.
             ArchCommand.GetLatest => connection == ConnectionState.Connected,
 
+            // P4C: document-level checkout. The state is derived from the
+            // verified workspace-manifest binding; a VIEWER is always
+            // disabled (and still server-enforced). Checkout needs a Verified
+            // controlled file; Check-In additionally needs no unsaved edits.
+            ArchCommand.Checkout => connection == ConnectionState.Connected
+                && CheckoutStateMachine.CanCheckout(document.CheckoutState, userRole),
+            ArchCommand.CheckIn => connection == ConnectionState.Connected
+                && CheckoutStateMachine.CanCheckIn(document.CheckoutState, userRole, document.IsSaved),
+
+            // P4C: Undo stays enabled after the checked-out document is CLOSED,
+            // targeting the remembered exact-manifest checkout binding - so the
+            // close-then-undo safe path (Undo refuses to replace bytes while
+            // the document is open) is reachable. The remembered target is
+            // still fully re-validated against the manifest + the authoritative
+            // server checkout before anything destructive happens.
+            ArchCommand.UndoCheckout => connection == ConnectionState.Connected
+                && (CheckoutStateMachine.CanUndo(document.CheckoutState, userRole)
+                    || (hasRememberedUndoTarget && CheckoutStateMachine.IsWriteRole(userRole))),
+
             _ => false,
         };
     }
@@ -44,12 +69,14 @@ public static class RibbonCommandPolicy
     /// </summary>
     public static IReadOnlyDictionary<ArchCommand, bool> Evaluate(
         ConnectionState connection,
-        CadDocumentContext document)
+        CadDocumentContext document,
+        string? userRole = null,
+        bool hasRememberedUndoTarget = false)
     {
         var map = new Dictionary<ArchCommand, bool>();
         foreach (var command in ArchCommands.All)
         {
-            map[command] = IsEnabled(command, connection, document);
+            map[command] = IsEnabled(command, connection, document, userRole, hasRememberedUndoTarget);
         }
         return map;
     }

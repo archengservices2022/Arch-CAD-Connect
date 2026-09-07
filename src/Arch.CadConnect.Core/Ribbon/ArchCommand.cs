@@ -45,6 +45,9 @@ public static class ArchCommands
         ArchCommand.SignOut => true,
         ArchCommand.ServerStatus => true,
         ArchCommand.GetLatest => true, // P4B
+        ArchCommand.Checkout => true, // P4C
+        ArchCommand.CheckIn => true, // P4C
+        ArchCommand.UndoCheckout => true, // P4C
         _ => false,
     };
 
@@ -100,6 +103,9 @@ public static class ArchCommands
                 ArchCommand.SignOut => "Sign out and revoke this machine's session.",
                 ArchCommand.ServerStatus => "Check the Arch PLM connection.",
                 ArchCommand.GetLatest => "Download the latest version of a managed CAD document and its dependencies into a local workspace.",
+                ArchCommand.Checkout => "Take an exclusive server checkout of the active managed document and make its local file editable.",
+                ArchCommand.CheckIn => "Upload the saved local file as the next version and release your checkout.",
+                ArchCommand.UndoCheckout => "Release your checkout and restore the local file to the checked-out version, discarding local changes.",
                 _ => command.DisplayName(),
             }
             : $"{command.DisplayName()} is not available yet. Coming in a later release.";

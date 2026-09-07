@@ -152,6 +152,11 @@ public sealed class WorkspaceMaterializer
 
             if (existing.Sha256 == version.Checksum && existing.Size == version.FileSize)
             {
+                // P4C: re-assert "controlled" on an already-current file (a
+                // prior run may have left it writable). A file the user
+                // currently holds a checkout on is a local-conflict below, not
+                // here, so this only ever touches genuinely-current copies.
+                Core.Files.ManagedFileGuard.SetControlled(absolutePath);
                 return baseResult with
                 {
                     RelativePath = relativePath,
@@ -215,6 +220,10 @@ public sealed class WorkspaceMaterializer
                     Reason = "local-conflict: a file appeared at this path during materialization and was not overwritten",
                 };
             }
+
+            // P4C: a freshly materialized, verified managed file is
+            // "controlled" (read-only) until the user checks it out.
+            Core.Files.ManagedFileGuard.SetControlled(absolutePath);
 
             return baseResult with
             {

@@ -1,3 +1,5 @@
+using Arch.CadConnect.Core.Workspace;
+
 namespace Arch.CadConnect.Core;
 
 /// <summary>
@@ -48,6 +50,23 @@ public sealed record CadDocumentContext
     /// The file name is NEVER used as identity - see <see cref="PlmIdentity"/>.
     /// </summary>
     public PlmIdentity? PlmIdentity { get; init; }
+
+    /// <summary>
+    /// P4C local checkout situation for this exact managed file, derived from
+    /// the verified workspace-manifest binding (+ an optional live server
+    /// status). <see cref="LocalCheckoutState.Unmanaged"/> when there is no
+    /// manifest binding. Drives ribbon enablement only.
+    /// </summary>
+    public LocalCheckoutState CheckoutState { get; init; } = LocalCheckoutState.Unmanaged;
+
+    /// <summary>The base-version snapshot recorded when THIS client checked the
+    ///  file out (present only while <see cref="CheckoutState"/> ==
+    ///  <see cref="LocalCheckoutState.CheckedOutByMe"/> via a local marker).</summary>
+    public WorkspaceCheckoutBinding? CheckoutBinding { get; init; }
+
+    /// <summary>The absolute workspace root the manifest binding was found
+    ///  under (null when <see cref="PlmIdentity"/> is null).</summary>
+    public string? WorkspaceRoot { get; init; }
 
     /// <summary>
     /// Best-known PLM status. Always <see cref="CadDocumentStatus.Unknown"/>

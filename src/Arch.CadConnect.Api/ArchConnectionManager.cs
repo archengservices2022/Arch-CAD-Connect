@@ -206,6 +206,41 @@ public sealed class ArchConnectionManager
         }
     }
 
+    /// <summary>P4C: take an exclusive checkout of a managed file. Requires a
+    ///  session; an auth failure transitions the connection to
+    ///  <see cref="ConnectionState.Unauthorized"/> and the exception is
+    ///  rethrown for the UI.</summary>
+    public Task<Workspace.CheckoutOperationResult> CheckoutAsync(ManagedFileRef file, CancellationToken ct = default)
+        => WithSessionAsync((api, s) => api.CheckoutAsync(s, file, ct));
+
+    /// <summary>P4C: check in a managed file's saved local copy as a new
+    ///  FileVersion and release the checkout.</summary>
+    public Task<Workspace.CheckInOperationResult> CheckInAsync(ManagedFileRef file, CancellationToken ct = default)
+        => WithSessionAsync((api, s) => api.CheckInAsync(s, file, ct));
+
+    /// <summary>P4C: release a checkout and restore the base FileVersion
+    ///  locally (staged + verified before the server release).</summary>
+    public Task<Workspace.UndoOperationResult> UndoCheckoutAsync(ManagedFileRef file, string? reason, CancellationToken ct = default)
+        => WithSessionAsync((api, s) => api.UndoCheckoutAsync(s, file, reason, ct));
+
+    private async Task<T> WithSessionAsync<T>(Func<IArchApi, IArchSession, Task<T>> op)
+    {
+        var session = CurrentSession
+            ?? throw new ArchApiException(ArchApiFailureKind.Unauthorized, "Sign in first.");
+        try
+        {
+            return await op(_apiFactory(session.Server), session).ConfigureAwait(false);
+        }
+        catch (ArchApiException ex)
+        {
+            if (ex.IsAuthFailure)
+            {
+                ApplyFailure(ex);
+            }
+            throw;
+        }
+    }
+
     /// <summary>The "Server Status" ribbon command: re-probe the server now.</summary>
     public async Task RefreshServerStatusAsync(CancellationToken ct = default)
     {
