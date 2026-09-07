@@ -91,4 +91,116 @@ public class WorkspaceScopeResolverTests
             ReferenceWorkspaceScope.InsideWorkspace,
             WorkspaceScopeResolver.Locate(target, new[] { Job1 }).Scope);
     }
+
+    // ---- nested workspaces: the DEEPEST containing root wins ----------
+
+    private static readonly string Outer = FullPath("Engineering", "WorkspaceA");
+    private static readonly string Inner = FullPath("Engineering", "WorkspaceA", "Nested");
+
+    [Fact]
+    public void Nested_workspaces_outer_first_inner_wins()
+    {
+        var target = Path.Combine(Inner, "PART.ipt");
+
+        var location = WorkspaceScopeResolver.Locate(target, new[] { Outer, Inner });
+
+        Assert.Equal(ReferenceWorkspaceScope.InsideWorkspace, location.Scope);
+        Assert.Equal(Inner, location.ContainingRoot);
+    }
+
+    [Fact]
+    public void Nested_workspaces_inner_first_inner_still_wins()
+    {
+        var target = Path.Combine(Inner, "PART.ipt");
+
+        var location = WorkspaceScopeResolver.Locate(target, new[] { Inner, Outer });
+
+        Assert.Equal(ReferenceWorkspaceScope.InsideWorkspace, location.Scope);
+        Assert.Equal(Inner, location.ContainingRoot);
+    }
+
+    [Fact]
+    public void A_file_directly_in_the_outer_workspace_still_resolves_to_the_outer_root()
+    {
+        var target = Path.Combine(Outer, "ROOT.iam");
+
+        var location = WorkspaceScopeResolver.Locate(target, new[] { Inner, Outer });
+
+        Assert.Equal(Outer, location.ContainingRoot);
+    }
+
+    [Fact]
+    public void Unrelated_roots_resolve_to_the_correct_containing_root()
+    {
+        var wsA = FullPath("Eng", "WorkspaceA");
+        var wsB = FullPath("Eng", "WorkspaceB");
+        var target = Path.Combine(wsA, "PART.ipt");
+
+        var location = WorkspaceScopeResolver.Locate(target, new[] { wsB, wsA });
+
+        Assert.Equal(ReferenceWorkspaceScope.InsideWorkspace, location.Scope);
+        Assert.Equal(wsA, location.ContainingRoot);
+    }
+
+    [Fact]
+    public void Same_filename_in_unrelated_roots_is_disambiguated_by_the_absolute_path_only()
+    {
+        var wsA = FullPath("Eng", "WorkspaceA");
+        var wsB = FullPath("Eng", "WorkspaceB");
+
+        Assert.Equal(wsA, WorkspaceScopeResolver.Locate(Path.Combine(wsA, "PART.ipt"), new[] { wsA, wsB }).ContainingRoot);
+        Assert.Equal(wsB, WorkspaceScopeResolver.Locate(Path.Combine(wsB, "PART.ipt"), new[] { wsA, wsB }).ContainingRoot);
+    }
+
+    [Fact]
+    public void Duplicate_roots_produce_a_deterministic_result()
+    {
+        var target = Path.Combine(Inner, "PART.ipt");
+
+        var a = WorkspaceScopeResolver.Locate(target, new[] { Outer, Inner, Outer, Inner });
+        var b = WorkspaceScopeResolver.Locate(target, new[] { Inner, Outer, Inner, Outer });
+
+        Assert.Equal(Inner, a.ContainingRoot);
+        Assert.Equal(a, b);
+    }
+
+    [Fact]
+    public void Trailing_separator_variants_of_a_root_give_the_same_result()
+    {
+        var target = Path.Combine(Inner, "PART.ipt");
+        var sep = Path.DirectorySeparatorChar;
+
+        var withSep = WorkspaceScopeResolver.Locate(target, new[] { Outer + sep, Inner + sep });
+        var withoutSep = WorkspaceScopeResolver.Locate(target, new[] { Outer, Inner });
+
+        Assert.Equal(withoutSep, withSep);
+        Assert.Equal(Inner, withSep.ContainingRoot);
+    }
+
+    [Fact]
+    public void Nesting_never_weakens_the_Job1_vs_Job10_boundary()
+    {
+        // Job10 has its own (nested-looking but sibling) root; a file in Job1
+        // must still not be captured by Job10 and vice-versa.
+        var target = Path.Combine(Job1, "PartA.ipt");
+
+        var location = WorkspaceScopeResolver.Locate(target, new[] { Job10, Job1 });
+
+        Assert.Equal(Job1, location.ContainingRoot);
+        Assert.Equal(
+            ReferenceWorkspaceScope.OutsideWorkspace,
+            WorkspaceScopeResolver.Locate(Path.Combine(Job10, "PartA.ipt"), new[] { Job1 }).Scope);
+    }
+
+    [Fact]
+    public void Nesting_never_weakens_the_archive_sibling_boundary()
+    {
+        var live = FullPath("Eng", "Job1");
+        var archive = FullPath("Eng", "Job1-archive");
+        var target = Path.Combine(archive, "OLD.ipt");
+
+        Assert.Equal(
+            ReferenceWorkspaceScope.OutsideWorkspace,
+            WorkspaceScopeResolver.Locate(target, new[] { live }).Scope);
+    }
 }

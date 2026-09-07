@@ -169,6 +169,10 @@ internal sealed class ArchAddInController : IDisposable
                 RunScanReferences();
                 break;
 
+            case ArchCommand.ReferenceHealth:
+                RunReferenceHealth();
+                break;
+
             default:
                 // Never fake a PDM result. Say plainly it is not built yet.
                 Info($"'{command.DisplayName()}' is not available yet. Coming in a later release.");
@@ -307,48 +311,107 @@ internal sealed class ArchAddInController : IDisposable
         return (null, "");
     }
 
-    // ---- P5A: read-only reference scan ------------------------------
+    // ---- P5A / P5B-A: read-only reference intelligence --------------
 
     /// <summary>
-    /// Report the references Inventor knows about for the active document.
-    /// Purely observational: it reads <c>ReferencedDocumentDescriptors</c> and
-    /// the local workspace manifest, and shows a text report. It never opens,
-    /// activates, saves, or repairs any document, and never touches the server.
-    /// COM reads run inline on the UI thread (this handler is already on it);
-    /// a local metadata scan needs no background work.
+    /// Report the references Inventor knows about for the active document
+    /// (P5A). Purely observational: it reads
+    /// <c>ReferencedDocumentDescriptors</c> and the local workspace manifest,
+    /// and shows a text report. It never opens, activates, saves, or repairs
+    /// any document, and never touches the server.
     /// </summary>
     private void RunScanReferences()
     {
+        if (!TryScanActiveDocument("Scan References", out var scan))
+        {
+            return;
+        }
+
+        var text = CadReferenceScanTextReport.Render(scan);
+        var status = scan.IsComplete ? "COMPLETE" : "PARTIAL";
+        using var dialog = new ScanResultDialog(
+            $"{ArchAddInInfo.DisplayName} - Scan References ({status})", text);
+        dialog.ShowDialog(new Win32Owner(SafeMainHwnd()));
+    }
+
+    /// <summary>
+    /// Diagnose the LOCAL health of every observed reference of the active
+    /// document (P5B-A): resolved / missing, inside / outside the workspace,
+    /// managed / unmanaged (exact manifest match only). Read-only - same
+    /// observation as P5A plus a pure classification pass. Never says a file is
+    /// "current" (that is P5B-B). Never mutates anything.
+    /// </summary>
+    private void RunReferenceHealth()
+    {
+        if (!TryScanActiveDocument("Reference Health", out var scan))
+        {
+            return;
+        }
+
+        var report = ReferenceHealthDiagnoser.Diagnose(scan);
+        var text = ReferenceHealthTextReport.Render(report);
+        using var dialog = new ScanResultDialog(
+            $"{ArchAddInInfo.DisplayName} - Reference Health ({report.OverallStatusLabel})", text);
+        dialog.ShowDialog(new Win32Owner(SafeMainHwnd()));
+    }
+
+    /// <summary>
+    /// Validate the active document and run the P5A reference scan on it.
+    /// COM reads run inline on the UI thread (the caller is already on it); a
+    /// local metadata scan needs no background work.
+    /// </summary>
+    private bool TryScanActiveDocument(string commandLabel, out CadReferenceScan scan)
+    {
+        scan = null!;
         var doc = _tracker.Current;
+
         if (string.IsNullOrEmpty(doc.FullPath) || !doc.HasBeenSavedToDisk)
         {
-            Info("Open and save an assembly, part or drawing before scanning its references.");
-            return;
+            Info($"Open and save an assembly, part or drawing before running {commandLabel}.");
+            return false;
         }
         if (doc.DocumentType is not (CadDocumentType.Iam or CadDocumentType.Ipt
             or CadDocumentType.Idw or CadDocumentType.Dwg))
         {
-            Info("Scan References supports Inventor assemblies (.iam), parts (.ipt) and drawings (.idw / .dwg).");
-            return;
+            Info($"{commandLabel} supports Inventor assemblies (.iam), parts (.ipt) and drawings (.idw / .dwg).");
+            return false;
         }
 
-        CadReferenceScan scan;
         try
         {
-            var scanner = new InventorReferenceScanner(_application, KnownWorkspaceRoots());
+            var scanner = new InventorReferenceScanner(_application, WorkspaceRootsForDocument(doc.FullPath!));
             scan = scanner.Scan(doc.FullPath!);
+            return true;
         }
         catch (Exception)
         {
-            Error("The reference scan could not be completed.");
-            return;
+            Error($"{commandLabel} could not be completed.");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The managed-workspace roots to diagnose an active document against. The
+    /// authoritative one is the workspace that ACTUALLY contains the document,
+    /// discovered from its own <c>.arch/workspace.json</c> marker
+    /// (<see cref="WorkspaceRootLocator"/>) - not whatever folder was last typed
+    /// into the Get Latest dialog. The last Get Latest target is still included
+    /// as an extra root so a reference resolved into a different managed
+    /// workspace is also recognised; the scanner de-duplicates.
+    /// </summary>
+    private static IEnumerable<string?> WorkspaceRootsForDocument(string? activeDocumentPath)
+    {
+        var containing = WorkspaceRootLocator.FindRootForFile(activeDocumentPath);
+        if (!string.IsNullOrWhiteSpace(containing))
+        {
+            yield return containing;
         }
 
-        var report = CadReferenceScanTextReport.Render(scan);
-        var status = scan.IsComplete ? "COMPLETE" : "PARTIAL";
-        using var dialog = new ScanResultDialog(
-            $"{ArchAddInInfo.DisplayName} - Scan References ({status})", report);
-        dialog.ShowDialog(new Win32Owner(SafeMainHwnd()));
+        var lastGetLatest = SafeLastWorkspaceRoot();
+        if (!string.IsNullOrWhiteSpace(lastGetLatest))
+        {
+            yield return lastGetLatest;
+        }
     }
 
     private void ShowGetLatestDialog()

@@ -67,11 +67,18 @@ public static class RibbonCommandPolicy
             ArchCommand.ScanReferences => connection == ConnectionState.Connected
                 && IsScannableDocument(document),
 
+            // P5B-A: READ-ONLY local reference-health diagnosis on top of the
+            // P5A scan. Same gate as Scan References - connected + a saved,
+            // supported document. Not role-gated (VIEWER may diagnose), no
+            // checkout, no mutation.
+            ArchCommand.ReferenceHealth => connection == ConnectionState.Connected
+                && IsScannableDocument(document),
+
             _ => false,
         };
     }
 
-    /// <summary>Supported P5A scan roots: an Inventor assembly, part or
+    /// <summary>Supported P5A/P5B-A scan roots: an Inventor assembly, part or
     ///  drawing that exists on disk. Managed status is irrelevant - an
     ///  unmanaged document still has references worth reporting.</summary>
     private static bool IsScannableDocument(CadDocumentContext document) =>

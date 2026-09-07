@@ -156,6 +156,66 @@ public class RibbonCommandPolicyTests
         Assert.False(map[ArchCommand.UndoCheckout]);
     }
 
+    // ---- P5B-A: Reference Health -----------------------------------
+
+    [Theory]
+    [InlineData(ConnectionState.SignedOut, false)]
+    [InlineData(ConnectionState.Connecting, false)]
+    [InlineData(ConnectionState.Connected, true)]
+    [InlineData(ConnectionState.Unauthorized, false)]
+    [InlineData(ConnectionState.ServerUnavailable, false)]
+    public void ReferenceHealth_is_enabled_only_when_connected_with_a_saved_supported_doc(
+        ConnectionState state, bool expected)
+    {
+        Assert.Equal(expected,
+            RibbonCommandPolicy.IsEnabled(ArchCommand.ReferenceHealth, state, ScannableDoc(), userRole: "ENGINEER"));
+    }
+
+    [Theory]
+    [InlineData(CadDocumentType.Iam)]
+    [InlineData(CadDocumentType.Ipt)]
+    [InlineData(CadDocumentType.Idw)]
+    [InlineData(CadDocumentType.Dwg)]
+    public void ReferenceHealth_supports_every_inventor_cad_document_type(CadDocumentType type)
+    {
+        Assert.True(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.ReferenceHealth, ConnectionState.Connected, ScannableDoc(type), "ENGINEER"));
+    }
+
+    [Fact]
+    public void ReferenceHealth_is_available_to_a_VIEWER_it_is_read_only()
+    {
+        Assert.True(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.ReferenceHealth, ConnectionState.Connected, ScannableDoc(), userRole: "VIEWER"));
+        Assert.True(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.ReferenceHealth, ConnectionState.Connected, ScannableDoc(), userRole: null));
+    }
+
+    [Fact]
+    public void ReferenceHealth_needs_a_saved_document_and_a_live_connection()
+    {
+        Assert.False(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.ReferenceHealth, ConnectionState.Connected, NoDoc, "ENGINEER"));
+
+        var neverSaved = CadDocumentContext.Create(fullPath: null, displayNameFallback: "Assembly1", isDirty: true);
+        Assert.False(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.ReferenceHealth, ConnectionState.Connected, neverSaved, "ENGINEER"));
+        Assert.False(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.ReferenceHealth, ConnectionState.ServerUnavailable, ScannableDoc(), "ENGINEER"));
+    }
+
+    [Fact]
+    public void ReferenceHealth_does_not_enable_any_mutation_command_and_needs_no_checkout()
+    {
+        var map = RibbonCommandPolicy.Evaluate(ConnectionState.Connected, ScannableDoc(), "VIEWER");
+
+        Assert.True(map[ArchCommand.ScanReferences]);   // P5A still available
+        Assert.True(map[ArchCommand.ReferenceHealth]);
+        Assert.False(map[ArchCommand.Checkout]);
+        Assert.False(map[ArchCommand.CheckIn]);
+        Assert.False(map[ArchCommand.UndoCheckout]);
+    }
+
     [Theory]
     [InlineData(ArchCommand.Status)]
     [InlineData(ArchCommand.Version)]
