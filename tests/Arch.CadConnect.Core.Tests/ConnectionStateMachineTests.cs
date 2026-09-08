@@ -50,6 +50,25 @@ public class ConnectionStateMachineTests
     }
 
     [Fact]
+    public void Rejected_from_server_unavailable_goes_unauthorized()
+    {
+        // A locally valid session can be retained while ServerUnavailable; a
+        // later request that finally reaches the server and is rejected must
+        // land in Unauthorized, not stay ServerUnavailable.
+        var m = new ConnectionStateMachine();
+        m.BeginSignIn();
+        m.SignInSucceeded();
+        m.ServerUnreachable();
+        Assert.Equal(ConnectionState.ServerUnavailable, m.State);
+
+        m.Rejected();
+        Assert.Equal(ConnectionState.Unauthorized, m.State);
+
+        m.BeginSignIn(); // retry still allowed
+        Assert.Equal(ConnectionState.Connecting, m.State);
+    }
+
+    [Fact]
     public void Illegal_transitions_throw_rather_than_silently_no_op()
     {
         var m = new ConnectionStateMachine();

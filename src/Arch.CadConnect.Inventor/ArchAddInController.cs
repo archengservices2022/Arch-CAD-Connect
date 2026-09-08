@@ -335,11 +335,19 @@ internal sealed class ArchAddInController : IDisposable
     }
 
     /// <summary>
-    /// Diagnose the LOCAL health of every observed reference of the active
-    /// document (P5B-A): resolved / missing, inside / outside the workspace,
-    /// managed / unmanaged (exact manifest match only). Read-only - same
-    /// observation as P5A plus a pure classification pass. Never says a file is
-    /// "current" (that is P5B-B). Never mutates anything.
+    /// Diagnose every observed reference of the active document across two
+    /// read-only dimensions:
+    ///
+    ///  - P5B-A LOCAL health: resolved / missing, inside / outside the
+    ///    workspace, managed / unmanaged (exact manifest match only);
+    ///  - P5B-B AUTHORITATIVE version status: CURRENT / STALE / UNKNOWN VERSION,
+    ///    established ONLY by comparing the exact stable cadDocumentId + the
+    ///    pinned local fileVersionId against the authenticated authoritative
+    ///    Arch PLM server. Any unsafe / unavailable case fails closed to
+    ///    UNKNOWN VERSION - CURRENT is never guessed.
+    ///
+    /// Read-only throughout: no document is opened, saved or repaired, no CAD
+    /// reference is changed, nothing is checked out or checked in.
     /// </summary>
     private void RunReferenceHealth()
     {
@@ -348,8 +356,36 @@ internal sealed class ArchAddInController : IDisposable
             return;
         }
 
-        var report = ReferenceHealthDiagnoser.Diagnose(scan);
-        var text = ReferenceHealthTextReport.Render(report);
+        var local = ReferenceHealthDiagnoser.Diagnose(scan);
+
+        // The distinct stable ids of every exactly-managed reference edge - the
+        // ONLY edges an authoritative version check applies to.
+        var managedIds = local.Entries
+            .Where(e => e.Management == ReferenceManagement.Managed
+                && e.ManagedIdentity is { CadDocumentId.Length: > 0 })
+            .Select(e => e.ManagedIdentity!.CadDocumentId)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        if (managedIds.Length == 0)
+        {
+            ShowReferenceVersionReport(ReferenceVersionReport.Build(
+                local, LatestVersionLookup.WholeFailure(LatestVersionOutcome.NotAttempted)));
+            return;
+        }
+
+        LatestVersionLookup? lookup = null;
+        RunBackground(
+            async ct => lookup = await _connection.GetLatestVersionsAsync(managedIds, ct),
+            "Checking versions",
+            onDone: () => ShowReferenceVersionReport(ReferenceVersionReport.Build(
+                local, lookup ?? LatestVersionLookup.WholeFailure(LatestVersionOutcome.ServerUnavailable))),
+            timeout: TimeSpan.FromMinutes(2));
+    }
+
+    private void ShowReferenceVersionReport(ReferenceVersionReport report)
+    {
+        var text = ReferenceVersionTextReport.Render(report);
         using var dialog = new ScanResultDialog(
             $"{ArchAddInInfo.DisplayName} - Reference Health ({report.OverallStatusLabel})", text);
         dialog.ShowDialog(new Win32Owner(SafeMainHwnd()));

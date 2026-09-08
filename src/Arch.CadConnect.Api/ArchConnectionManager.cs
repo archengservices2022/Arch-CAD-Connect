@@ -1,4 +1,5 @@
 using Arch.CadConnect.Core.Connection;
+using Arch.CadConnect.Core.References;
 using Arch.CadConnect.Core.Session;
 using Arch.CadConnect.Core.Workspace;
 
@@ -223,6 +224,58 @@ public sealed class ArchConnectionManager
     public Task<Workspace.UndoOperationResult> UndoCheckoutAsync(ManagedFileRef file, string? reason, CancellationToken ct = default)
         => WithSessionAsync((api, s) => api.UndoCheckoutAsync(s, file, reason, ct));
 
+    /// <summary>
+    /// P5B-B: fetch the AUTHORITATIVE latest FileVersion identity for each of
+    /// <paramref name="cadDocumentIds"/> for the current session. READ-ONLY.
+    /// Never throws for transport / auth / unknown-id failures - they are
+    /// outcomes in the returned <see cref="LatestVersionLookup"/> so version
+    /// classification fails closed. With no session every id resolves to
+    /// <see cref="LatestVersionOutcome.AuthenticationFailed"/>.
+    /// </summary>
+    public async Task<LatestVersionLookup> GetLatestVersionsAsync(
+        IReadOnlyCollection<string> cadDocumentIds, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(cadDocumentIds);
+
+        var session = CurrentSession;
+        if (session is null)
+        {
+            return LatestVersionLookup.WholeFailure(LatestVersionOutcome.AuthenticationFailed);
+        }
+
+        LatestVersionLookup lookup;
+        try
+        {
+            lookup = await _apiFactory(session.Server)
+                .GetLatestVersionsAsync(session, cadDocumentIds, ct)
+                .ConfigureAwait(false);
+        }
+        catch (ArchApiException ex)
+        {
+            // The shipped probe fails closed and never throws; a future / fake
+            // IArchApi might. Honour the same session-failure semantics as
+            // every other authenticated call, but still return a fail-closed
+            // result rather than propagate.
+            if (ex.IsAuthFailure)
+            {
+                InvalidateRejectedSession();
+                return LatestVersionLookup.WholeFailure(LatestVersionOutcome.AuthenticationFailed);
+            }
+            return LatestVersionLookup.WholeFailure(LatestVersionOutcome.ServerUnavailable);
+        }
+
+        // An AUTHORITATIVE 401 / 403 rejects this desktop session: clear the
+        // stored token and move the connection to Unauthorized, exactly like
+        // GetLatest / Checkout / Check-In / Undo. The fail-closed version
+        // result is still returned (this read never throws for auth).
+        if (lookup.WholeFailureOutcome == LatestVersionOutcome.AuthenticationFailed)
+        {
+            InvalidateRejectedSession();
+        }
+
+        return lookup;
+    }
+
     private async Task<T> WithSessionAsync<T>(Func<IArchApi, IArchSession, Task<T>> op)
     {
         var session = CurrentSession
@@ -281,14 +334,34 @@ public sealed class ArchConnectionManager
     {
         if (ex.IsAuthFailure)
         {
-            _store.Clear();
-            SetSession(null);
-            _machine.Rejected();
+            InvalidateRejectedSession();
             return;
         }
 
         // Everything else (network, timeout, 5xx, a rejected request) leaves
         // the user in "server unavailable" - retryable without re-auth.
         _machine.ServerUnreachable();
+    }
+
+    /// <summary>
+    /// The server rejected this session's bearer: discard the persisted token,
+    /// forget the in-memory session, and move the connection to
+    /// <see cref="ConnectionState.Unauthorized"/>. <see cref="ConnectionStateMachine.Rejected"/>
+    /// is legal from Connecting / Connected / ServerUnavailable - all the states
+    /// in which a live session can exist - so an auth rejection is always
+    /// reflected consistently, even when a valid session was retained while the
+    /// server was briefly unreachable. From SignedOut / Unauthorized there is no
+    /// session to reject (the guard just keeps the no-throw contract intact).
+    /// </summary>
+    private void InvalidateRejectedSession()
+    {
+        _store.Clear();
+        SetSession(null);
+        if (_machine.State is ConnectionState.Connecting
+            or ConnectionState.Connected
+            or ConnectionState.ServerUnavailable)
+        {
+            _machine.Rejected();
+        }
     }
 }

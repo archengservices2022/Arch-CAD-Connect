@@ -46,10 +46,21 @@ public sealed class ConnectionStateMachine
             or ConnectionState.ServerUnavailable,
         trigger: nameof(SessionConfirmed));
 
-    /// <summary>Server was reached but rejected the credentials / session.</summary>
+    /// <summary>
+    /// Server was reached but rejected the credentials / session. Legal from
+    /// <see cref="ConnectionState.Connecting"/> and
+    /// <see cref="ConnectionState.Connected"/>, and ALSO from
+    /// <see cref="ConnectionState.ServerUnavailable"/>: a locally valid session
+    /// can legitimately be retained while the server was briefly unreachable,
+    /// and a later authenticated request that finally reaches the server can
+    /// come back 401 / 403 - that must land in
+    /// <see cref="ConnectionState.Unauthorized"/>, not stay "server unavailable".
+    /// </summary>
     public void Rejected() => Transition(
         ConnectionState.Unauthorized,
-        from: static s => s is ConnectionState.Connecting or ConnectionState.Connected,
+        from: static s => s is ConnectionState.Connecting
+            or ConnectionState.Connected
+            or ConnectionState.ServerUnavailable,
         trigger: nameof(Rejected));
 
     /// <summary>Server could not be reached (network / TLS / timeout / 5xx).</summary>

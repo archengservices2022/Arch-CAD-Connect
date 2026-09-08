@@ -1,5 +1,6 @@
 using Arch.CadConnect.Api.Dtos;
 using Arch.CadConnect.Api.Workspace;
+using Arch.CadConnect.Core.References;
 using Arch.CadConnect.Core.Session;
 using Arch.CadConnect.Core.Workspace;
 
@@ -103,6 +104,21 @@ public interface IArchApi
     /// throws and the checkout is NEVER released.
     /// </summary>
     Task<UndoOperationResult> UndoCheckoutAsync(IArchSession session, ManagedFileRef file, string? reason, CancellationToken ct = default);
+
+    // ---- Authoritative version intelligence (P5B-B) ------------------
+
+    /// <summary>
+    /// Fetch the AUTHORITATIVE latest FileVersion identity for each of
+    /// <paramref name="cadDocumentIds"/> (stable server ids only). READ-ONLY -
+    /// no file bytes, no mutation, no checkout.
+    ///
+    /// Never throws for an unreachable server, a rejected session, an unknown
+    /// id, an unsupported endpoint, or a malformed body - those are per-id (or
+    /// whole-lookup) outcomes in the returned <see cref="LatestVersionLookup"/>
+    /// so P5B-B version classification fails closed to UNKNOWN VERSION.
+    /// </summary>
+    Task<LatestVersionLookup> GetLatestVersionsAsync(
+        IArchSession session, IReadOnlyCollection<string> cadDocumentIds, CancellationToken ct = default);
 
     // ---- future scope (declared, not implemented) ---------------------
 

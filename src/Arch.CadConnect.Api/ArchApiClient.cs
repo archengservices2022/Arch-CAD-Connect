@@ -5,7 +5,9 @@ using System.Text;
 using System.Text.Json;
 
 using Arch.CadConnect.Api.Dtos;
+using Arch.CadConnect.Api.References;
 using Arch.CadConnect.Api.Workspace;
+using Arch.CadConnect.Core.References;
 using Arch.CadConnect.Core.Session;
 using Arch.CadConnect.Core.Workspace;
 
@@ -192,6 +194,17 @@ public sealed class ArchApiClient : IArchApi
 
     private CheckoutOrchestrator Orchestrator(IArchSession session) =>
         new(Server, session, _http, _options.Timeout, clock: null, editorProbe: _options.EditorProbe);
+
+    // ---- Authoritative version intelligence (P5B-B) ------------------
+
+    public Task<LatestVersionLookup> GetLatestVersionsAsync(
+        IArchSession session, IReadOnlyCollection<string> cadDocumentIds, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(cadDocumentIds);
+        return new HttpLatestVersionProbe(Server, _http, _options.Timeout)
+            .LookupAsync(session, cadDocumentIds, ct);
+    }
 
     // ---- future scope: declared, not implemented --------------------
 

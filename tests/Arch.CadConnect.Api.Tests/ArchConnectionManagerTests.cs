@@ -1,6 +1,7 @@
 using Arch.CadConnect.Api;
 using Arch.CadConnect.Api.Dtos;
 using Arch.CadConnect.Core.Connection;
+using Arch.CadConnect.Core.References;
 using Arch.CadConnect.Core.Session;
 using Arch.CadConnect.Core.Workspace;
 
@@ -47,6 +48,13 @@ public class ArchConnectionManagerTests
         public Task<Arch.CadConnect.Api.Workspace.CheckoutOperationResult> CheckoutAsync(IArchSession s, ManagedFileRef f, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Checkout");
         public Task<Arch.CadConnect.Api.Workspace.CheckInOperationResult> CheckInAsync(IArchSession s, ManagedFileRef f, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Check In");
         public Task<Arch.CadConnect.Api.Workspace.UndoOperationResult> UndoCheckoutAsync(IArchSession s, ManagedFileRef f, string? reason, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Undo Checkout");
+        public IReadOnlyCollection<string>? LastLatestVersionIds { get; private set; }
+        public Func<LatestVersionLookup>? OnGetLatestVersions { get; set; }
+        public Task<LatestVersionLookup> GetLatestVersionsAsync(IArchSession s, IReadOnlyCollection<string> ids, CancellationToken ct = default)
+        {
+            LastLatestVersionIds = ids;
+            return Task.FromResult(OnGetLatestVersions?.Invoke() ?? LatestVersionLookup.WholeFailure(LatestVersionOutcome.LookupUnavailable));
+        }
         public Task<WhereUsedDto> GetWhereUsedAsync(IArchSession s, string id, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Where Used");
         public Task<ReleaseInfoDto> GetReleaseInfoAsync(IArchSession s, string r, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Release information");
     }
@@ -275,6 +283,204 @@ public class ArchConnectionManagerTests
 
         Assert.False(await mgr.TryRestoreAsync());
         Assert.Equal(ConnectionState.Unauthorized, mgr.State);
+        Assert.Null(store.TryLoad());
+    }
+
+    // ---- P5B-B: authoritative latest-version lookup -----------------
+
+    [Fact]
+    public async Task GetLatestVersions_without_a_session_fails_closed_to_AuthenticationFailed()
+    {
+        var mgr = new ArchConnectionManager(s => new FakeApi(s), new InMemorySessionStore());
+
+        var lookup = await mgr.GetLatestVersionsAsync(new[] { "cad_a" });
+
+        Assert.Equal(LatestVersionOutcome.AuthenticationFailed, lookup.Get("cad_a").Outcome);
+    }
+
+    [Fact]
+    public async Task GetLatestVersions_with_a_session_delegates_to_the_api()
+    {
+        var store = new InMemorySessionStore();
+        FakeApi api = null!;
+        var mgr = new ArchConnectionManager(server => api = new FakeApi(server)
+        {
+            OnSignIn = () => Session(),
+            OnGetLatestVersions = () => LatestVersionLookup.FromResults(new[] { LatestVersionResult.Found("cad_a", "fv_a2") }),
+        }, store);
+        await mgr.SignInAsync("https://plm.example.com", "t@o.com", "pw");
+
+        var lookup = await mgr.GetLatestVersionsAsync(new[] { "cad_a" });
+
+        Assert.Equal(new[] { "cad_a" }, api.LastLatestVersionIds);
+        Assert.Equal(LatestVersionOutcome.Found, lookup.Get("cad_a").Outcome);
+        Assert.Equal("fv_a2", lookup.Get("cad_a").Version!.LatestFileVersionId);
+    }
+
+    private async Task<(ArchConnectionManager Mgr, InMemorySessionStore Store)> ConnectedManager(
+        Func<LatestVersionLookup> onGetLatestVersions)
+    {
+        var store = new InMemorySessionStore();
+        var mgr = new ArchConnectionManager(server => new FakeApi(server)
+        {
+            OnSignIn = () => Session(),
+            OnGetLatestVersions = onGetLatestVersions,
+        }, store);
+        await mgr.SignInAsync("https://plm.example.com", "t@o.com", "pw");
+        Assert.Equal(ConnectionState.Connected, mgr.State);
+        Assert.NotNull(store.TryLoad());
+        return (mgr, store);
+    }
+
+    [Fact]
+    public async Task GetLatestVersions_on_an_authoritative_401_clears_the_session_and_moves_to_Unauthorized()
+    {
+        var (mgr, store) = await ConnectedManager(
+            () => LatestVersionLookup.WholeFailure(LatestVersionOutcome.AuthenticationFailed));
+
+        var lookup = await mgr.GetLatestVersionsAsync(new[] { "cad_a" });
+
+        // session invalidated exactly like every other authenticated operation
+        Assert.Equal(ConnectionState.Unauthorized, mgr.State);
+        Assert.Null(mgr.CurrentSession);
+        Assert.Null(store.TryLoad());
+        // ...but the version result still fails closed rather than throwing
+        Assert.Equal(LatestVersionOutcome.AuthenticationFailed, lookup.Get("cad_a").Outcome);
+    }
+
+    [Fact]
+    public async Task GetLatestVersions_on_a_thrown_auth_failure_also_invalidates_and_fails_closed()
+    {
+        var store = new InMemorySessionStore();
+        var mgr = new ArchConnectionManager(server => new FakeApi(server)
+        {
+            OnSignIn = () => Session(),
+            OnGetLatestVersions = () => throw new ArchApiException(ArchApiFailureKind.Unauthorized, "rejected"),
+        }, store);
+        await mgr.SignInAsync("https://plm.example.com", "t@o.com", "pw");
+
+        var lookup = await mgr.GetLatestVersionsAsync(new[] { "cad_a" });
+
+        Assert.Equal(ConnectionState.Unauthorized, mgr.State);
+        Assert.Null(store.TryLoad());
+        Assert.Equal(LatestVersionOutcome.AuthenticationFailed, lookup.Get("cad_a").Outcome);
+    }
+
+    [Fact]
+    public async Task GetLatestVersions_on_a_500_keeps_the_session_connected()
+    {
+        var (mgr, store) = await ConnectedManager(
+            () => LatestVersionLookup.WholeFailure(LatestVersionOutcome.ServerUnavailable));
+
+        var lookup = await mgr.GetLatestVersionsAsync(new[] { "cad_a" });
+
+        Assert.Equal(ConnectionState.Connected, mgr.State);
+        Assert.NotNull(mgr.CurrentSession);
+        Assert.NotNull(store.TryLoad());
+        Assert.Equal(LatestVersionOutcome.ServerUnavailable, lookup.Get("cad_a").Outcome);
+    }
+
+    [Fact]
+    public async Task GetLatestVersions_on_a_404_lookup_unavailable_keeps_the_session_connected()
+    {
+        var (mgr, store) = await ConnectedManager(
+            () => LatestVersionLookup.WholeFailure(LatestVersionOutcome.LookupUnavailable));
+
+        await mgr.GetLatestVersionsAsync(new[] { "cad_a" });
+
+        Assert.Equal(ConnectionState.Connected, mgr.State);
+        Assert.NotNull(store.TryLoad());
+    }
+
+    [Fact]
+    public async Task GetLatestVersions_on_Found_keeps_the_session_connected()
+    {
+        var (mgr, store) = await ConnectedManager(
+            () => LatestVersionLookup.FromResults(new[] { LatestVersionResult.Found("cad_a", "fv_a") }));
+
+        await mgr.GetLatestVersionsAsync(new[] { "cad_a" });
+
+        Assert.Equal(ConnectionState.Connected, mgr.State);
+        Assert.NotNull(mgr.CurrentSession);
+        Assert.NotNull(store.TryLoad());
+    }
+
+    // ---- Round 3: auth rejection while in ServerUnavailable --------
+
+    /// <summary>Connected, persisted, then a non-auth server failure drops the
+    ///  connection to ServerUnavailable while KEEPING the (locally valid)
+    ///  session and persisted token. Uses ONE shared FakeApi so per-call
+    ///  behaviour can be reconfigured between operations.</summary>
+    private async Task<(ArchConnectionManager Mgr, InMemorySessionStore Store, FakeApi Api)> ServerUnavailableManagerWithRetainedSession(
+        Func<LatestVersionLookup> onGetLatestVersions)
+    {
+        var store = new InMemorySessionStore();
+        var api = new FakeApi(ArchServerUri.Parse("https://plm.example.com"))
+        {
+            OnSignIn = () => Session(),
+            OnGetLatestVersions = onGetLatestVersions,
+        };
+        var mgr = new ArchConnectionManager(_ => api, store);
+        await mgr.SignInAsync("https://plm.example.com", "t@o.com", "pw");
+
+        api.OnGetSession = () => throw new ArchApiException(ArchApiFailureKind.Server, "server down");
+        await mgr.RefreshServerStatusAsync();
+
+        Assert.Equal(ConnectionState.ServerUnavailable, mgr.State);
+        Assert.NotNull(mgr.CurrentSession);   // session retained
+        Assert.NotNull(store.TryLoad());      // persisted token retained
+        return (mgr, store, api);
+    }
+
+    [Fact]
+    public async Task ServerUnavailable_plus_retained_session_plus_auth_rejection_goes_Unauthorized_and_clears_the_session()
+    {
+        var (mgr, store, _) = await ServerUnavailableManagerWithRetainedSession(
+            () => LatestVersionLookup.WholeFailure(LatestVersionOutcome.AuthenticationFailed));
+
+        var lookup = await mgr.GetLatestVersionsAsync(new[] { "cad_a" });
+
+        Assert.Equal(ConnectionState.Unauthorized, mgr.State);
+        Assert.Null(mgr.CurrentSession);
+        Assert.Null(store.TryLoad());
+        Assert.Equal(LatestVersionOutcome.AuthenticationFailed, lookup.Get("cad_a").Outcome);
+    }
+
+    [Fact]
+    public async Task ServerUnavailable_plus_ordinary_server_failure_stays_ServerUnavailable_and_keeps_the_session()
+    {
+        var (mgr, store, _) = await ServerUnavailableManagerWithRetainedSession(
+            () => LatestVersionLookup.WholeFailure(LatestVersionOutcome.ServerUnavailable));
+
+        var lookup = await mgr.GetLatestVersionsAsync(new[] { "cad_a" });
+
+        Assert.Equal(ConnectionState.ServerUnavailable, mgr.State);   // NOT incorrectly Unauthorized
+        Assert.NotNull(mgr.CurrentSession);                            // legitimate session kept
+        Assert.NotNull(store.TryLoad());
+        Assert.Equal(LatestVersionOutcome.ServerUnavailable, lookup.Get("cad_a").Outcome);
+    }
+
+    [Fact]
+    public async Task Auth_failure_from_ServerUnavailable_via_ApplyFailure_also_lands_in_Unauthorized()
+    {
+        // The shared InvalidateRejectedSession path (ApplyFailure) is used by
+        // RefreshServerStatus / GetLatest / Checkout / Check-In / Undo - prove
+        // it reaches Unauthorized from ServerUnavailable there too.
+        var store = new InMemorySessionStore();
+        var api = new FakeApi(ArchServerUri.Parse("https://plm.example.com")) { OnSignIn = () => Session() };
+        var mgr = new ArchConnectionManager(_ => api, store);
+        await mgr.SignInAsync("https://plm.example.com", "t@o.com", "pw");
+
+        api.OnGetSession = () => throw new ArchApiException(ArchApiFailureKind.Server, "down");
+        await mgr.RefreshServerStatusAsync();
+        Assert.Equal(ConnectionState.ServerUnavailable, mgr.State);
+        Assert.NotNull(mgr.CurrentSession);
+
+        api.OnGetSession = () => throw new ArchApiException(ArchApiFailureKind.Unauthorized, "rejected");
+        await mgr.RefreshServerStatusAsync();
+
+        Assert.Equal(ConnectionState.Unauthorized, mgr.State);
+        Assert.Null(mgr.CurrentSession);
         Assert.Null(store.TryLoad());
     }
 }
