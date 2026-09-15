@@ -74,6 +74,18 @@ public static class RibbonCommandPolicy
             ArchCommand.ReferenceHealth => connection == ConnectionState.Connected
                 && IsScannableDocument(document),
 
+            // P5C: controlled repair of ONE stale managed reference. It mutates
+            // the in-memory CAD reference graph, so - unlike the read-only
+            // P5A/P5B commands - it is write-role gated (a VIEWER could never
+            // check out the referencing document anyway). Same document gate as
+            // Reference Health; the real eligibility (a stale managed reference,
+            // an available authoritative target, a writable referencing
+            // document) is decided in the preview after the click, and the
+            // engineer must still explicitly confirm before anything changes.
+            ArchCommand.RepairReference => connection == ConnectionState.Connected
+                && IsScannableDocument(document)
+                && CheckoutStateMachine.IsWriteRole(userRole),
+
             _ => false,
         };
     }

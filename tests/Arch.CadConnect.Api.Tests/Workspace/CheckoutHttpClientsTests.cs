@@ -97,6 +97,110 @@ public class CheckoutHttpClientsTests
     }
 
     [Fact]
+    public async Task GetStatus_mine_without_a_checkout_id_fails_closed_at_the_boundary()
+    {
+        var handler = new FakeHttpHandler(_ => FakeHttpHandler.Json(HttpStatusCode.OK,
+            """{"state":"mine","checkout":{"cadDocumentId":"cad_1","baseFileVersionId":"fv_7","baseVersionNumber":3}}"""));
+        var ex = await Assert.ThrowsAsync<ArchApiException>(() => Client(handler).GetStatusAsync("cad_1"));
+        Assert.Equal(ArchApiFailureKind.Server, ex.Kind);
+    }
+
+    [Fact]
+    public async Task GetStatus_mine_with_a_blank_checkout_id_fails_closed_at_the_boundary()
+    {
+        var handler = new FakeHttpHandler(_ => FakeHttpHandler.Json(HttpStatusCode.OK,
+            """{"state":"mine","checkout":{"id":"   ","cadDocumentId":"cad_1","baseFileVersionId":"fv_7"}}"""));
+        var ex = await Assert.ThrowsAsync<ArchApiException>(() => Client(handler).GetStatusAsync("cad_1"));
+        Assert.Equal(ArchApiFailureKind.Server, ex.Kind);
+    }
+
+    [Fact]
+    public async Task GetStatus_mine_without_a_base_fileVersionId_fails_closed_at_the_boundary()
+    {
+        var handler = new FakeHttpHandler(_ => FakeHttpHandler.Json(HttpStatusCode.OK,
+            """{"state":"mine","checkout":{"id":"co_42","cadDocumentId":"cad_1","baseVersionNumber":3}}"""));
+        var ex = await Assert.ThrowsAsync<ArchApiException>(() => Client(handler).GetStatusAsync("cad_1"));
+        Assert.Equal(ArchApiFailureKind.Server, ex.Kind);
+    }
+
+    [Fact]
+    public async Task GetStatus_mine_with_a_blank_base_fileVersionId_fails_closed_at_the_boundary()
+    {
+        var handler = new FakeHttpHandler(_ => FakeHttpHandler.Json(HttpStatusCode.OK,
+            """{"state":"mine","checkout":{"id":"co_42","cadDocumentId":"cad_1","baseFileVersionId":""}}"""));
+        var ex = await Assert.ThrowsAsync<ArchApiException>(() => Client(handler).GetStatusAsync("cad_1"));
+        Assert.Equal(ArchApiFailureKind.Server, ex.Kind);
+    }
+
+    // ---- ROUND 5 (Codex HIGH): checkout authority must bind to the EXACT
+    //      requested parent cadDocumentId - never discarded, never inferred,
+    //      never trimmed-and-accepted. ---------------------------------
+
+    [Fact]
+    public async Task GetStatus_mine_with_a_missing_cadDocumentId_fails_closed()
+    {
+        var handler = new FakeHttpHandler(_ => FakeHttpHandler.Json(HttpStatusCode.OK,
+            """{"state":"mine","checkout":{"id":"co_42","baseFileVersionId":"fv_7","baseVersionNumber":3}}"""));
+        var ex = await Assert.ThrowsAsync<ArchApiException>(() => Client(handler).GetStatusAsync("cad_1"));
+        Assert.Equal(ArchApiFailureKind.Server, ex.Kind);
+    }
+
+    [Fact]
+    public async Task GetStatus_mine_with_a_blank_cadDocumentId_fails_closed()
+    {
+        var handler = new FakeHttpHandler(_ => FakeHttpHandler.Json(HttpStatusCode.OK,
+            """{"state":"mine","checkout":{"id":"co_42","cadDocumentId":"   ","baseFileVersionId":"fv_7","baseVersionNumber":3}}"""));
+        var ex = await Assert.ThrowsAsync<ArchApiException>(() => Client(handler).GetStatusAsync("cad_1"));
+        Assert.Equal(ArchApiFailureKind.Server, ex.Kind);
+    }
+
+    [Fact]
+    public async Task GetStatus_mine_with_a_whitespace_padded_but_otherwise_matching_cadDocumentId_fails_closed()
+    {
+        // Same-looking id, padded - must NEVER be trimmed and accepted.
+        var handler = new FakeHttpHandler(_ => FakeHttpHandler.Json(HttpStatusCode.OK,
+            """{"state":"mine","checkout":{"id":"co_42","cadDocumentId":" cad_1 ","baseFileVersionId":"fv_7","baseVersionNumber":3}}"""));
+        var ex = await Assert.ThrowsAsync<ArchApiException>(() => Client(handler).GetStatusAsync("cad_1"));
+        Assert.Equal(ArchApiFailureKind.Server, ex.Kind);
+    }
+
+    [Fact]
+    public async Task GetStatus_mine_with_a_DIFFERENT_cadDocumentId_fails_closed()
+    {
+        var handler = new FakeHttpHandler(_ => FakeHttpHandler.Json(HttpStatusCode.OK,
+            """{"state":"mine","checkout":{"id":"co_42","cadDocumentId":"cad_WRONG","baseFileVersionId":"fv_7","baseVersionNumber":3}}"""));
+        var ex = await Assert.ThrowsAsync<ArchApiException>(() => Client(handler).GetStatusAsync("cad_1"));
+        Assert.Equal(ArchApiFailureKind.Server, ex.Kind);
+    }
+
+    [Fact]
+    public async Task GetStatus_mine_with_the_exact_matching_cadDocumentId_is_accepted()
+    {
+        var handler = new FakeHttpHandler(_ => FakeHttpHandler.Json(HttpStatusCode.OK,
+            """{"state":"mine","checkout":{"id":"co_42","cadDocumentId":"cad_1","baseFileVersionId":"fv_7","baseVersionNumber":3}}"""));
+        var status = await Client(handler).GetStatusAsync("cad_1");
+        Assert.Equal(ServerCheckoutState.Mine, status.State);
+    }
+
+    [Fact]
+    public async Task RequestCheckout_with_a_DIFFERENT_cadDocumentId_fails_closed()
+    {
+        var handler = new FakeHttpHandler(_ => FakeHttpHandler.Json(HttpStatusCode.Created,
+            """{"status":"created","checkout":{"id":"co_1","cadDocumentId":"cad_WRONG","baseFileVersionId":"fv_9","baseVersionNumber":4}}"""));
+        var ex = await Assert.ThrowsAsync<ArchApiException>(() => Client(handler).RequestCheckoutAsync("cad_1"));
+        Assert.Equal(ArchApiFailureKind.Server, ex.Kind);
+    }
+
+    [Fact]
+    public async Task RequestCheckout_with_a_missing_cadDocumentId_fails_closed()
+    {
+        var handler = new FakeHttpHandler(_ => FakeHttpHandler.Json(HttpStatusCode.Created,
+            """{"status":"created","checkout":{"id":"co_1","baseFileVersionId":"fv_9","baseVersionNumber":4}}"""));
+        var ex = await Assert.ThrowsAsync<ArchApiException>(() => Client(handler).RequestCheckoutAsync("cad_1"));
+        Assert.Equal(ArchApiFailureKind.Server, ex.Kind);
+    }
+
+    [Fact]
     public async Task GetStatus_locked_by_another_surfaces_the_holder()
     {
         var handler = new FakeHttpHandler(_ => FakeHttpHandler.Json(HttpStatusCode.OK,

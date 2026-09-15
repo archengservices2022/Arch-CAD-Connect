@@ -5,6 +5,7 @@ using Arch.CadConnect.Api.Workspace;
 using Arch.CadConnect.Core;
 using Arch.CadConnect.Core.Connection;
 using Arch.CadConnect.Core.Documents;
+using Arch.CadConnect.Core.Files;
 using Arch.CadConnect.Core.References;
 using Arch.CadConnect.Core.Ribbon;
 using Arch.CadConnect.Core.Session;
@@ -171,6 +172,10 @@ internal sealed class ArchAddInController : IDisposable
 
             case ArchCommand.ReferenceHealth:
                 RunReferenceHealth();
+                break;
+
+            case ArchCommand.RepairReference:
+                RunRepairReference();
                 break;
 
             default:
@@ -389,6 +394,368 @@ internal sealed class ArchAddInController : IDisposable
         using var dialog = new ScanResultDialog(
             $"{ArchAddInInfo.DisplayName} - Reference Health ({report.OverallStatusLabel})", text);
         dialog.ShowDialog(new Win32Owner(SafeMainHwnd()));
+    }
+
+    // ---- P5C: controlled reference repair --------------------------
+
+    /// <summary>
+    /// Repair ONE stale managed reference of the active document through an
+    /// explicit preview + confirmation:
+    ///
+    ///   scan -> diagnose (P5B-A) -> authoritative version status (P5B-B)
+    ///     -> pick a STALE managed reference with an exact stable identity
+    ///     -> resolve the authoritative latest FileVersion target from an
+    ///        EXISTING verified managed-workspace copy (never a filename guess,
+    ///        never a broad Get Latest)
+    ///     -> preview -> explicit confirmation -> replace ONE reference via the
+    ///        Inventor API -> rescan -> verify.
+    ///
+    /// P5C never saves, checks out, checks in, undoes, creates a FileVersion or
+    /// revision, or runs a broad Get Latest. If the exact target cannot be
+    /// proven, or the referencing document is not already writable, it fails
+    /// closed and explains what the engineer must do.
+    /// </summary>
+    private void RunRepairReference()
+    {
+        if (!TryScanActiveDocument("Repair Reference", out var scan))
+        {
+            return;
+        }
+
+        var local = ReferenceHealthDiagnoser.Diagnose(scan);
+
+        var managedIds = local.Entries
+            .Where(e => e.Management == ReferenceManagement.Managed
+                && e.ManagedIdentity is { CadDocumentId.Length: > 0 })
+            .Select(e => e.ManagedIdentity!.CadDocumentId)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        if (managedIds.Length == 0)
+        {
+            Info("Repair Reference found no managed references on this document. Nothing to repair.");
+            return;
+        }
+
+        var activePath = _tracker.Current.FullPath!;
+        var roots = WorkspaceRootsForDocument(activePath).Where(r => r is not null).Select(r => r!).ToList();
+        var parentIds = local.Entries
+            .Select(e => e.Reference.ParentIdentity?.CadDocumentId)
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Select(id => id!)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        LatestVersionLookup? lookup = null;
+        IReadOnlyDictionary<string, ServerCheckoutStatus?> checkoutStatuses =
+            new Dictionary<string, ServerCheckoutStatus?>();
+        RunBackground(
+            async ct =>
+            {
+                lookup = await _connection.GetLatestVersionsAsync(managedIds, ct);
+                checkoutStatuses = await LoadCheckoutStatusesAsync(parentIds, ct);
+            },
+            "Checking versions",
+            onDone: () => ContinueRepairReference(
+                local,
+                lookup ?? LatestVersionLookup.WholeFailure(LatestVersionOutcome.ServerUnavailable),
+                roots,
+                checkoutStatuses),
+            timeout: TimeSpan.FromMinutes(2));
+    }
+
+    private void ContinueRepairReference(
+        ReferenceHealthReport local,
+        LatestVersionLookup lookup,
+        IReadOnlyList<string> roots,
+        IReadOnlyDictionary<string, ServerCheckoutStatus?> checkoutStatuses)
+    {
+        var report = ReferenceVersionReport.Build(local, lookup);
+
+        var stale = report.Assessments
+            .Where(a => a.Applicable && a.Status == PlmVersionStatus.Stale)
+            .ToArray();
+
+        if (stale.Length == 0)
+        {
+            Info("Repair Reference: no STALE managed reference was found. "
+                + "Only a reference whose authoritative Arch PLM version is behind the latest can be repaired here.");
+            return;
+        }
+
+        var locator = new WorkspaceManifestRepairTargetLocator(roots);
+        var plans = stale
+            .Select(a => ReferenceRepairPlanner.Plan(
+                a,
+                locator.Locate(
+                    a.CadDocumentId ?? "",
+                    a.AuthoritativeLatestFileVersionId ?? "",
+                    a.AuthoritativeTargetFileSize,
+                    a.AuthoritativeTargetSha256 ?? ""),
+                BuildReferencingContext(a.Entry.Reference.ParentAbsolutePath, roots, checkoutStatuses)))
+            .ToArray();
+
+        ReferenceRepairPlan chosen;
+        using (var dialog = new RepairReferenceDialog(
+            $"{ArchAddInInfo.DisplayName} - Repair Reference", plans))
+        {
+            if (dialog.ShowDialog(new Win32Owner(SafeMainHwnd())) != DialogResult.OK
+                || dialog.SelectedPlan is not { } selected)
+            {
+                return; // cancelled - zero CAD changes
+            }
+            chosen = selected;
+        }
+
+        if (!chosen.CanProceed)
+        {
+            Error(chosen.EligibilityLabel + " - " + chosen.EligibilityDetail);
+            return;
+        }
+
+        BeginFinalRepairPreflight(chosen, roots);
+    }
+
+    private void BeginFinalRepairPreflight(ReferenceRepairPlan previewed, IReadOnlyList<string> roots)
+    {
+        var parentEntry = FindManifestEntry(previewed.ReferencingDocumentPath, roots);
+        var parentIds = parentEntry is { CadDocumentId.Length: > 0 }
+            ? new[] { parentEntry.CadDocumentId }
+            : Array.Empty<string>();
+
+        LatestVersionLookup? latest = null;
+        IReadOnlyDictionary<string, ServerCheckoutStatus?> checkoutStatuses =
+            new Dictionary<string, ServerCheckoutStatus?>();
+        RunBackground(
+            async ct =>
+            {
+                latest = await _connection.GetLatestVersionsAsync(new[] { previewed.CadDocumentId! }, ct);
+                checkoutStatuses = await LoadCheckoutStatusesAsync(parentIds, ct);
+            },
+            "Revalidating repair",
+            onDone: () => CompleteFinalRepairPreflight(
+                previewed,
+                roots,
+                latest ?? LatestVersionLookup.WholeFailure(LatestVersionOutcome.ServerUnavailable),
+                checkoutStatuses),
+            timeout: TimeSpan.FromMinutes(2));
+    }
+
+    private void CompleteFinalRepairPreflight(
+        ReferenceRepairPlan previewed,
+        IReadOnlyList<string> roots,
+        LatestVersionLookup latest,
+        IReadOnlyDictionary<string, ServerCheckoutStatus?> checkoutStatuses)
+    {
+        CadReferenceScan freshScan;
+        try
+        {
+            freshScan = new InventorReferenceScanner(_application, roots)
+                .Scan(previewed.ReferencingDocumentPath);
+        }
+        catch
+        {
+            Error("Repair Reference could not freshly re-scan the selected referencing document. No mutation was attempted.");
+            return;
+        }
+
+        var matchingEdges = freshScan.References.Where(r =>
+            PathEquals(r.ParentAbsolutePath, previewed.ReferencingDocumentPath)
+            && PathEquals(r.ResolvedAbsolutePath, previewed.CurrentReferencePath)
+            && r.RelationshipKind == previewed.RelationshipKind
+            && r.ManifestIdentity is { IsVerified: true } identity
+            && string.Equals(identity.CadDocumentId, previewed.CadDocumentId, StringComparison.Ordinal)
+            && string.Equals(identity.FileVersionId, previewed.CurrentPinnedFileVersionId, StringComparison.Ordinal))
+            .ToArray();
+
+        if (matchingEdges.Length != 1)
+        {
+            Error("Repair Reference detected preview drift or an ambiguous reference. The exact parent/reference "
+                + "relationship and stable identity no longer match; no mutation was attempted.");
+            return;
+        }
+
+        var local = ReferenceHealthDiagnoser.Diagnose(freshScan);
+        var freshEntry = local.Entries.Single(e => Equals(e.Reference, matchingEdges[0]));
+        var assessment = ReferenceVersionClassifier.Assess(freshEntry, latest);
+        if (assessment.Status != PlmVersionStatus.Stale
+            || !string.Equals(assessment.AuthoritativeLatestFileVersionId,
+                previewed.AuthoritativeTargetFileVersionId, StringComparison.Ordinal))
+        {
+            Error("Repair Reference detected an authoritative version change since preview. No mutation was attempted.");
+            return;
+        }
+
+        // Re-read the manifest (stable local path mapping only) and re-hash the
+        // target's current bytes against the SERVER-authoritative integrity
+        // metadata immediately before the final confirmation. Persisted Verified
+        // state and the mutable manifest checksum are never enough.
+        var target = new WorkspaceManifestRepairTargetLocator(roots).Locate(
+            assessment.CadDocumentId ?? "",
+            assessment.AuthoritativeLatestFileVersionId ?? "",
+            assessment.AuthoritativeTargetFileSize,
+            assessment.AuthoritativeTargetSha256 ?? "");
+        var freshPlan = ReferenceRepairPlanner.Plan(
+            assessment,
+            target,
+            BuildReferencingContext(previewed.ReferencingDocumentPath, roots, checkoutStatuses));
+
+        if (!freshPlan.CanProceed || !SamePreviewIdentity(previewed, freshPlan))
+        {
+            Error("Repair Reference final authorization failed or the previewed operation changed. "
+                + freshPlan.EligibilityLabel + " - " + freshPlan.EligibilityDetail);
+            return;
+        }
+
+        var result = ReferenceRepairCoordinator.Execute(
+            freshPlan,
+            new MessageBoxRepairConfirmation(this),
+            new InventorRepairPreflight(_application, _connection, roots),
+            new InventorReferenceReplacer(_application, roots),
+            () => new InventorReferenceScanner(_application, roots).Scan(freshPlan.ReferencingDocumentPath));
+
+        // The reference graph / dirty state may have changed - re-derive even
+        // for an uncertain/failed mutation result.
+        try { _documents.RefreshFromActiveDocument(); } catch { /* COM teardown */ }
+        RefreshEnablement();
+
+        if (result.Succeeded)
+        {
+            Info(result.Message);
+        }
+        else if (result.Outcome != ReferenceRepairOutcome.CancelledByUser)
+        {
+            Error(result.Message);
+        }
+    }
+
+    private async Task<IReadOnlyDictionary<string, ServerCheckoutStatus?>> LoadCheckoutStatusesAsync(
+        IEnumerable<string> cadDocumentIds, CancellationToken ct)
+    {
+        var statuses = new Dictionary<string, ServerCheckoutStatus?>(StringComparer.Ordinal);
+        foreach (var id in cadDocumentIds.Distinct(StringComparer.Ordinal))
+        {
+            try
+            {
+                statuses[id] = await _connection.GetCheckoutStatusAsync(id, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+                statuses[id] = null; // unavailable/rejected is fail-closed
+            }
+        }
+        return statuses;
+    }
+
+    /// <summary>
+    /// Whether the document that OWNS the reference may already be modified +
+    /// saved under existing Arch rules. Derived from the verified workspace
+    /// manifest binding (checked out by me?) + the on-disk read-only attribute.
+    /// P5C never checks a document out and never clears read-only protection.
+    /// </summary>
+    private static RepairReferencingContext BuildReferencingContext(
+        string parentAbsolutePath,
+        IReadOnlyList<string> roots,
+        IReadOnlyDictionary<string, ServerCheckoutStatus?> checkoutStatuses)
+    {
+        var entry = FindManifestEntry(parentAbsolutePath, roots);
+        ServerCheckoutStatus? serverStatus = null;
+        if (entry is { CadDocumentId.Length: > 0 })
+        {
+            checkoutStatuses.TryGetValue(entry.CadDocumentId, out serverStatus);
+        }
+
+        // Fail-closed writability: only an AFFIRMATIVE Writable result (file
+        // present, no read-only attribute, can actually be opened for write)
+        // authorizes repair. A missing file, an attribute-probe failure, an
+        // access-denied error, or any inability to establish write access is
+        // NOT writable - never authorize by negating a helper whose failure
+        // also returns "not read-only".
+        var writability = LocalWritabilityProbe.Probe(parentAbsolutePath);
+        var state = CheckoutStateMachine.Evaluate(
+            entry, fileExists: writability != LocalWritability.Missing, serverStatus);
+        return ReferenceRepairWritability.Evaluate(
+            parentAbsolutePath,
+            state,
+            onDiskWritable: LocalWritabilityProbe.IsAffirmativelyWritable(writability),
+            ReferenceRepairWritability.AuthoritativeCheckoutMatches(entry, serverStatus));
+    }
+
+    private static WorkspaceManifestEntry? FindManifestEntry(string absolutePath, IReadOnlyList<string> roots)
+    {
+        foreach (var root in roots)
+        {
+            try
+            {
+                var entry = WorkspaceManifest.LoadOrEmpty(root).FindByAbsolutePath(absolutePath);
+                if (entry is not null) return entry;
+            }
+            catch (Exception ex) when (ex is IOException or WorkspaceRootException or UnauthorizedAccessException)
+            {
+                // Try the next known root; no binding means unmanaged/fail-closed.
+            }
+        }
+        return null;
+    }
+
+    private static bool SamePreviewIdentity(ReferenceRepairPlan previewed, ReferenceRepairPlan fresh) =>
+        PathEquals(previewed.ReferencingDocumentPath, fresh.ReferencingDocumentPath)
+        && PathEquals(previewed.CurrentReferencePath, fresh.CurrentReferencePath)
+        && PathEquals(previewed.ProposedTargetPath, fresh.ProposedTargetPath)
+        && previewed.RelationshipKind == fresh.RelationshipKind
+        && string.Equals(previewed.CadDocumentId, fresh.CadDocumentId, StringComparison.Ordinal)
+        && string.Equals(previewed.CurrentPinnedFileVersionId, fresh.CurrentPinnedFileVersionId, StringComparison.Ordinal)
+        && string.Equals(previewed.AuthoritativeTargetFileVersionId,
+            fresh.AuthoritativeTargetFileVersionId, StringComparison.Ordinal);
+
+    private static bool PathEquals(string? left, string? right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right)) return false;
+        try
+        {
+            return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The explicit engineer confirmation gate, shown IMMEDIATELY
+    ///  before any Inventor mutation. Declining makes zero CAD changes.</summary>
+    private sealed class MessageBoxRepairConfirmation(ArchAddInController owner) : IReferenceRepairConfirmation
+    {
+        public bool Confirm(ReferenceRepairPlan plan)
+        {
+            // Disclosure-only, READ-ONLY, best-effort live occurrence count -
+            // NEVER an authorization input (Prepare's fail-closed enumeration
+            // and the pre-mutation live-set equality check are the sole
+            // authorities for what actually gets mutated). Codex round-3
+            // finding: the old fixed wording ("Only this one reference will
+            // change") reads as "one occurrence" and is misleading whenever
+            // the same file backs more than one placement in the assembly.
+            var occurrenceCount = InventorReferenceReplacer.TryCountLiveMatchingOccurrencesForDisclosure(
+                owner._application, plan.ReferencingDocumentPath, plan.CurrentReferencePath);
+            var scopeLine = RepairOccurrenceDisclosureText.ScopeSentence(occurrenceCount);
+
+            var message =
+                "Replace this reference now?" + Environment.NewLine + Environment.NewLine
+                + "Reference : " + plan.ObservedReferenceName + Environment.NewLine
+                + "New target: " + plan.ProposedTargetPath + Environment.NewLine + Environment.NewLine
+                + scopeLine + Environment.NewLine + Environment.NewLine
+                + "The document will become MODIFIED in memory - you must Save it yourself. "
+                + "P5C will not save, check in, or check out.";
+            return MessageBox.Show(
+                new Win32Owner(owner.SafeMainHwnd()),
+                message,
+                ArchAddInInfo.DisplayName,
+                MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Warning) == DialogResult.OK;
+        }
     }
 
     /// <summary>

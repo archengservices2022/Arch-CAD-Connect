@@ -48,6 +48,7 @@ public class ArchConnectionManagerTests
         public Task<Arch.CadConnect.Api.Workspace.CheckoutOperationResult> CheckoutAsync(IArchSession s, ManagedFileRef f, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Checkout");
         public Task<Arch.CadConnect.Api.Workspace.CheckInOperationResult> CheckInAsync(IArchSession s, ManagedFileRef f, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Check In");
         public Task<Arch.CadConnect.Api.Workspace.UndoOperationResult> UndoCheckoutAsync(IArchSession s, ManagedFileRef f, string? reason, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Undo Checkout");
+        public Task<ServerCheckoutStatus> GetCheckoutStatusAsync(IArchSession s, string cadDocumentId, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Checkout Status");
         public IReadOnlyCollection<string>? LastLatestVersionIds { get; private set; }
         public Func<LatestVersionLookup>? OnGetLatestVersions { get; set; }
         public Task<LatestVersionLookup> GetLatestVersionsAsync(IArchSession s, IReadOnlyCollection<string> ids, CancellationToken ct = default)

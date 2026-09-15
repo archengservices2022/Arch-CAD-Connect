@@ -112,7 +112,11 @@ public sealed record CadManifestIdentity(
     string CadDocumentId,
     string FileVersionId,
     string DocumentNumber,
-    string RelativePath);
+    string RelativePath,
+    /// <summary>Whether the manifest currently claims this exact local binding
+    /// was verified. Diagnostics retain unverified bindings, but P5C must not
+    /// use one as repair authorization.</summary>
+    bool IsVerified = true);
 
 public enum CadReferenceResolution
 {

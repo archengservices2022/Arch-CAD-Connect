@@ -33,9 +33,9 @@ public sealed class HttpLatestVersionProbeTests
     public async Task Maps_a_well_formed_contract_response_to_per_id_results()
     {
         var handler = FakeHttpHandler.Always(HttpStatusCode.OK,
-            """
+            $$"""
             {"contract":"arch-plm.desktop-latest-versions.v1","results":[
-              {"cadDocumentId":"cad_a","recognized":true,"latestFileVersionId":"fv_a9","latestVersionNumber":9},
+              {"cadDocumentId":"cad_a","recognized":true,"latestFileVersionId":"fv_a9","latestVersionNumber":9,"fileSize":{{CanonSize}},"checksum":"{{CanonSha}}"},
               {"cadDocumentId":"cad_b","recognized":false}
             ]}
             """);
@@ -45,6 +45,8 @@ public sealed class HttpLatestVersionProbeTests
         var a = lookup.Get("cad_a");
         Assert.Equal(LatestVersionOutcome.Found, a.Outcome);
         Assert.Equal("fv_a9", a.Version!.LatestFileVersionId);
+        Assert.Equal(CanonSize, a.Version.FileSize);
+        Assert.Equal(CanonSha, a.Version.Sha256);
 
         Assert.Equal(LatestVersionOutcome.DocumentNotRecognized, lookup.Get("cad_b").Outcome);
 
@@ -60,10 +62,7 @@ public sealed class HttpLatestVersionProbeTests
     public async Task An_id_the_server_omits_is_not_recognized()
     {
         var handler = FakeHttpHandler.Always(HttpStatusCode.OK,
-            """
-            {"contract":"arch-plm.desktop-latest-versions.v1","results":[
-              {"cadDocumentId":"cad_a","recognized":true,"latestFileVersionId":"fv_a"}]}
-            """);
+            Body(Entry("cad_a", latest: "fv_a")));
 
         var lookup = await Probe(handler).LookupAsync(Session(), Ids);
 
@@ -153,24 +152,47 @@ public sealed class HttpLatestVersionProbeTests
 
     private const string ContractId = "arch-plm.desktop-latest-versions.v1";
 
+    /// <summary>A canonical (64 lowercase hex) server-authoritative SHA-256.</summary>
+    internal const string CanonSha =
+        "0123456789abcdef" + "0123456789abcdef" + "0123456789abcdef" + "0123456789abcdef"; // 64 lowercase hex
+    internal const long CanonSize = 348160;
+
     /// <summary>A single-line contract body with the given entries verbatim.</summary>
     private static string Body(params string[] entries) =>
         "{\"contract\":\"" + ContractId + "\",\"results\":[" + string.Join(",", entries) + "]}";
 
-    private static string Entry(string id, bool? recognized = true, string? latest = null)
+    /// <summary>
+    /// A result entry. A <c>recognized:true</c> entry with a <paramref name="latest"/>
+    /// carries CANONICAL integrity metadata by default (version number + fileSize
+    /// + checksum), because the server always does now; pass explicit
+    /// <paramref name="fileSize"/> / <paramref name="checksum"/> /
+    /// <paramref name="versionNumber"/> (or the "omit" sentinels) for the
+    /// negative cases.
+    /// </summary>
+    private static string Entry(
+        string id, bool? recognized = true, string? latest = null,
+        long? fileSize = null, string? checksum = null, int? versionNumber = null,
+        bool omitFileSize = false, bool omitChecksum = false, bool omitVersionNumber = false)
     {
         var parts = new List<string> { "\"cadDocumentId\":\"" + id + "\"" };
-        if (recognized is bool b)
-        {
-            parts.Add("\"recognized\":" + (b ? "true" : "false"));
-        }
-        else
-        {
-            parts.Add("\"recognized\":null");
-        }
+        parts.Add(recognized is bool b ? "\"recognized\":" + (b ? "true" : "false") : "\"recognized\":null");
         if (latest is not null)
         {
             parts.Add("\"latestFileVersionId\":\"" + latest + "\"");
+        }
+
+        var canonical = recognized == true && latest is not null;
+        if (!omitVersionNumber && (versionNumber is not null || canonical))
+        {
+            parts.Add("\"latestVersionNumber\":" + (versionNumber ?? 7));
+        }
+        if (!omitFileSize && (fileSize is not null || canonical))
+        {
+            parts.Add("\"fileSize\":" + (fileSize ?? CanonSize));
+        }
+        if (!omitChecksum && (checksum is not null || canonical))
+        {
+            parts.Add("\"checksum\":\"" + (checksum ?? CanonSha) + "\"");
         }
         return "{" + string.Join(",", parts) + "}";
     }
@@ -239,6 +261,86 @@ public sealed class HttpLatestVersionProbeTests
     public async Task A_missing_recognized_field_is_malformed_never_found()
     {
         var handler = FakeHttpHandler.Always(HttpStatusCode.OK, Body(EntryNoRecognized("cad_a", "fv_a")));
+
+        Assert.Equal(LatestVersionOutcome.MalformedResponse,
+            (await Probe(handler).LookupAsync(Session(), Ids)).Get("cad_a").Outcome);
+    }
+
+    // ---- P5C-B: server-authoritative integrity metadata is required --------
+
+    [Fact]
+    public async Task A_valid_recognized_result_carries_canonical_fileSize_and_checksum()
+    {
+        var handler = FakeHttpHandler.Always(HttpStatusCode.OK, Body(Entry("cad_a", latest: "fv_a")));
+
+        var a = (await Probe(handler).LookupAsync(Session(), Ids)).Get("cad_a");
+
+        Assert.Equal(LatestVersionOutcome.Found, a.Outcome);
+        Assert.Equal(CanonSize, a.Version!.FileSize);
+        Assert.Equal(CanonSha, a.Version.Sha256);
+        Assert.True(a.Version.HasCanonicalIntegrity);
+    }
+
+    public static IEnumerable<object[]> MalformedIntegrityEntries()
+    {
+        // missing fileSize
+        yield return new object[] { Entry("cad_a", latest: "fv_a", omitFileSize: true) };
+        // negative fileSize
+        yield return new object[] { Entry("cad_a", latest: "fv_a", fileSize: -1) };
+        // out-of-safe-range fileSize
+        yield return new object[] { Entry("cad_a", latest: "fv_a", fileSize: 9007199254740992) };
+        // missing checksum
+        yield return new object[] { Entry("cad_a", latest: "fv_a", omitChecksum: true) };
+        // blank checksum
+        yield return new object[] { Entry("cad_a", latest: "fv_a", checksum: "") };
+        // whitespace checksum
+        yield return new object[] { Entry("cad_a", latest: "fv_a", checksum: "                                                                ") };
+        // wrong length (63)
+        yield return new object[] { Entry("cad_a", latest: "fv_a", checksum: new string('a', 63)) };
+        // wrong length (65)
+        yield return new object[] { Entry("cad_a", latest: "fv_a", checksum: new string('a', 65)) };
+        // sha256: prefix
+        yield return new object[] { Entry("cad_a", latest: "fv_a", checksum: "sha256:" + new string('a', 57)) };
+        // non-hex
+        yield return new object[] { Entry("cad_a", latest: "fv_a", checksum: new string('g', 64)) };
+        // uppercase
+        yield return new object[] { Entry("cad_a", latest: "fv_a", checksum: new string('A', 64)) };
+        // missing version number
+        yield return new object[] { Entry("cad_a", latest: "fv_a", omitVersionNumber: true) };
+        // non-positive version number
+        yield return new object[] { Entry("cad_a", latest: "fv_a", versionNumber: 0) };
+    }
+
+    [Theory]
+    [MemberData(nameof(MalformedIntegrityEntries))]
+    public async Task A_recognized_result_with_malformed_integrity_metadata_fails_closed(string entry)
+    {
+        var handler = FakeHttpHandler.Always(HttpStatusCode.OK, Body(entry));
+
+        var a = (await Probe(handler).LookupAsync(Session(), Ids)).Get("cad_a");
+
+        Assert.NotEqual(LatestVersionOutcome.Found, a.Outcome);
+        Assert.Equal(LatestVersionOutcome.MalformedResponse, a.Outcome);
+        Assert.Null(a.Version);
+    }
+
+    [Fact]
+    public async Task A_malformed_checksum_is_never_normalised_or_trimmed_into_validity()
+    {
+        // A canonical checksum wrapped in whitespace must NOT be trimmed to pass.
+        var handler = FakeHttpHandler.Always(HttpStatusCode.OK,
+            Body(Entry("cad_a", latest: "fv_a", checksum: " " + CanonSha + " ")));
+
+        Assert.Equal(LatestVersionOutcome.MalformedResponse,
+            (await Probe(handler).LookupAsync(Session(), Ids)).Get("cad_a").Outcome);
+    }
+
+    [Fact]
+    public async Task A_non_integer_fileSize_fails_closed_never_throws()
+    {
+        var handler = FakeHttpHandler.Always(HttpStatusCode.OK,
+            Body("{\"cadDocumentId\":\"cad_a\",\"recognized\":true,\"latestFileVersionId\":\"fv_a\","
+                 + "\"latestVersionNumber\":7,\"fileSize\":123.5,\"checksum\":\"" + CanonSha + "\"}"));
 
         Assert.Equal(LatestVersionOutcome.MalformedResponse,
             (await Probe(handler).LookupAsync(Session(), Ids)).Get("cad_a").Outcome);
@@ -410,9 +512,7 @@ public sealed class HttpLatestVersionProbeTests
         // " cad_a " (padded). The padded id must NOT be trimmed onto "cad_a"
         // and must NOT poison / overwrite the exact valid result.
         var handler = FakeHttpHandler.Always(HttpStatusCode.OK,
-            "{\"contract\":\"" + ContractId + "\",\"results\":["
-            + "{\"cadDocumentId\":\"cad_a\",\"recognized\":true,\"latestFileVersionId\":\"fv_a_exact\"},"
-            + "{\"cadDocumentId\":\" cad_a \",\"recognized\":true,\"latestFileVersionId\":\"fv_a_padded\"}]}");
+            Body(Entry("cad_a", latest: "fv_a_exact"), Entry(" cad_a ", latest: "fv_a_padded")));
 
         var a = (await Probe(handler).LookupAsync(Session(), Ids)).Get("cad_a");
 
@@ -426,9 +526,7 @@ public sealed class HttpLatestVersionProbeTests
     {
         // Same as above with the padded entry FIRST, proving order-independence.
         var handler = FakeHttpHandler.Always(HttpStatusCode.OK,
-            "{\"contract\":\"" + ContractId + "\",\"results\":["
-            + "{\"cadDocumentId\":\" cad_a \",\"recognized\":true,\"latestFileVersionId\":\"fv_a_padded\"},"
-            + "{\"cadDocumentId\":\"cad_a\",\"recognized\":true,\"latestFileVersionId\":\"fv_a_exact\"}]}");
+            Body(Entry(" cad_a ", latest: "fv_a_padded"), Entry("cad_a", latest: "fv_a_exact")));
 
         var a = (await Probe(handler).LookupAsync(Session(), Ids)).Get("cad_a");
 

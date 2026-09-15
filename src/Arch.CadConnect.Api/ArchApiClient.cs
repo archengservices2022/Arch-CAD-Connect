@@ -192,6 +192,18 @@ public sealed class ArchApiClient : IArchApi
         return Orchestrator(session).UndoAsync(file.WorkspaceRoot, file.AbsoluteFilePath, reason, ct);
     }
 
+    public Task<ServerCheckoutStatus> GetCheckoutStatusAsync(
+        IArchSession session, string cadDocumentId, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        if (string.IsNullOrWhiteSpace(cadDocumentId))
+        {
+            throw new ArgumentException("A stable CAD document id is required.", nameof(cadDocumentId));
+        }
+        return new CheckoutHttpClient(Server, session, _http, _options.Timeout)
+            .GetStatusAsync(cadDocumentId, ct);
+    }
+
     private CheckoutOrchestrator Orchestrator(IArchSession session) =>
         new(Server, session, _http, _options.Timeout, clock: null, editorProbe: _options.EditorProbe);
 

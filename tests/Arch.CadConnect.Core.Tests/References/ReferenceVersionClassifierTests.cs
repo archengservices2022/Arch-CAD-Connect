@@ -85,6 +85,48 @@ public class ReferenceVersionClassifierTests
         Assert.Equal(ReferenceHealth.Warning, a.HealthContribution);
     }
 
+    // ---- P5C-B: server-authoritative integrity metadata carry-through ----
+
+    private static readonly string CanonSha =
+        "0123456789abcdef" + "0123456789abcdef" + "0123456789abcdef" + "0123456789abcdef";
+
+    [Fact]
+    public void A_STALE_assessment_carries_the_canonical_server_target_integrity_metadata()
+    {
+        var oracle = LatestVersionLookup.FromResults(new[]
+        {
+            LatestVersionResult.Found("cad_a", "fv_a_v3", 8192, CanonSha),
+        });
+
+        var a = Assess(Managed("cad_a", "fv_a_v1"), oracle);
+
+        Assert.Equal(PlmVersionStatus.Stale, a.Status);
+        Assert.True(a.HasAuthoritativeTargetIntegrity);
+        Assert.Equal(8192, a.AuthoritativeTargetFileSize);
+        Assert.Equal(CanonSha, a.AuthoritativeTargetSha256);
+    }
+
+    [Fact]
+    public void An_authoritative_response_without_canonical_integrity_leaves_the_assessment_without_it()
+    {
+        // Found, but the server integrity is absent / non-canonical.
+        foreach (var bad in new[]
+        {
+            LatestVersionResult.Found("cad_a", "fv_a_v3"),                       // -1 / ""
+            LatestVersionResult.Found("cad_a", "fv_a_v3", -5, CanonSha),          // negative size
+            LatestVersionResult.Found("cad_a", "fv_a_v3", 10, CanonSha.ToUpperInvariant()), // uppercase
+            LatestVersionResult.Found("cad_a", "fv_a_v3", 10, "sha256:" + CanonSha[7..]),   // prefix
+        })
+        {
+            var a = Assess(Managed("cad_a", "fv_a_v1"),
+                LatestVersionLookup.FromResults(new[] { bad }));
+
+            Assert.Equal(PlmVersionStatus.Stale, a.Status); // still STALE for P5B-B
+            Assert.False(a.HasAuthoritativeTargetIntegrity); // but no trusted target for P5C
+            Assert.Equal(-1, a.AuthoritativeTargetFileSize);
+        }
+    }
+
     // ---- fail-closed to UNKNOWN VERSION ------------------------------
 
     [Fact]

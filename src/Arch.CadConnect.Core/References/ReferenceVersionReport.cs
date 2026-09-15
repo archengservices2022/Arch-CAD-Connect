@@ -15,9 +15,25 @@ public sealed record ReferenceVersionAssessment(
     PlmVersionStatus Status,
     string? CadDocumentId,
     string? AuthoritativeLatestFileVersionId,
-    IReadOnlyList<string> Reasons)
+    IReadOnlyList<string> Reasons,
+    /// <summary>Server-authoritative canonical byte size of the authoritative
+    ///  latest FileVersion (P5C-B). <c>-1</c> unless <see cref="Status"/> is
+    ///  <see cref="PlmVersionStatus.Stale"/> / <see cref="PlmVersionStatus.Current"/>
+    ///  AND the server supplied canonical integrity metadata.</summary>
+    long AuthoritativeTargetFileSize = -1,
+    /// <summary>Server-authoritative canonical SHA-256 (64 lowercase hex) of the
+    ///  authoritative latest FileVersion (P5C-B). Null / empty unless the server
+    ///  supplied canonical integrity metadata. NEVER the local manifest checksum.</summary>
+    string? AuthoritativeTargetSha256 = null)
 {
     public string? PinnedLocalFileVersionId => Entry.ManagedIdentity?.FileVersionId is { Length: > 0 } fv ? fv : null;
+
+    /// <summary>True only when the server supplied canonical integrity metadata
+    ///  for the authoritative latest FileVersion - the precondition for a P5C
+    ///  repair to have a trusted target.</summary>
+    public bool HasAuthoritativeTargetIntegrity =>
+        FileVersionIntegrity.IsRepresentableFileSize(AuthoritativeTargetFileSize)
+        && FileVersionIntegrity.IsCanonicalSha256(AuthoritativeTargetSha256);
 
     public string StatusLabel => Status switch
     {

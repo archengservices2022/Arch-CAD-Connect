@@ -176,7 +176,8 @@ public sealed class CadReferenceScanner : ICadReferenceScanner
         var entry = manifest?.FindByAbsolutePath(absolutePath);
         return entry is null
             ? null
-            : new CadManifestIdentity(entry.CadDocumentId, entry.FileVersionId, entry.DocumentNumber, entry.RelativePath);
+            : new CadManifestIdentity(entry.CadDocumentId, entry.FileVersionId, entry.DocumentNumber,
+                entry.RelativePath, entry.State == WorkspaceManifestEntryState.Verified);
     }
 
     private WorkspaceManifest? ManifestFor(string root)

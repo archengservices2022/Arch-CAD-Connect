@@ -25,6 +25,7 @@ public enum ArchCommand
     // INFORMATION panel
     ScanReferences, // P5A
     ReferenceHealth, // P5B-A
+    RepairReference, // P5C
     Status,
     Version,
     Revision,
@@ -52,6 +53,7 @@ public static class ArchCommands
         ArchCommand.UndoCheckout => true, // P4C
         ArchCommand.ScanReferences => true, // P5A
         ArchCommand.ReferenceHealth => true, // P5B-A
+        ArchCommand.RepairReference => true, // P5C
         _ => false,
     };
 
@@ -64,6 +66,7 @@ public static class ArchCommands
         ArchCommand.UndoCheckout => true,
         ArchCommand.ScanReferences => true,
         ArchCommand.ReferenceHealth => true,
+        ArchCommand.RepairReference => true,
         ArchCommand.Status => true,
         ArchCommand.Version => true,
         ArchCommand.Revision => true,
@@ -86,6 +89,7 @@ public static class ArchCommands
         ArchCommand.UndoCheckout => "Undo Checkout",
         ArchCommand.ScanReferences => "Scan References",
         ArchCommand.ReferenceHealth => "Reference Health",
+        ArchCommand.RepairReference => "Repair Reference",
         ArchCommand.Status => "Status",
         ArchCommand.Version => "Version",
         ArchCommand.Revision => "Revision",
@@ -103,8 +107,11 @@ public static class ArchCommands
         _ => "INFORMATION",
     };
 
-    // ScanReferences (P5A) and ReferenceHealth (P5B-A) fall through to
-    // INFORMATION - read-only intelligence, not PDM state changes.
+    // ScanReferences (P5A), ReferenceHealth (P5B-A) and RepairReference (P5C)
+    // fall through to INFORMATION - the reference-intelligence workflow. Repair
+    // mutates the in-memory CAD reference graph, but only ever after an explicit
+    // preview + confirmation, and never touches PLM state (no save / checkout /
+    // check-in / Get Latest).
 
     public static string ToolTip(this ArchCommand command) =>
         command.IsImplemented()
@@ -119,6 +126,7 @@ public static class ArchCommands
                 ArchCommand.UndoCheckout => "Release your checkout and restore the local file to the checked-out version, discarding local changes.",
                 ArchCommand.ScanReferences => "Report the references Inventor knows about for the active document. Read-only - never changes, saves, or repairs anything.",
                 ArchCommand.ReferenceHealth => "Diagnose the local health of each reference: resolved / missing, inside / outside the workspace, managed / unmanaged. Read-only - never changes or repairs anything.",
+                ArchCommand.RepairReference => "Repair ONE stale managed reference of the active document by repointing it to the authoritative latest version - with an explicit preview and confirmation. Never saves, checks out, or checks in.",
                 _ => command.DisplayName(),
             }
             : $"{command.DisplayName()} is not available yet. Coming in a later release.";
@@ -131,7 +139,7 @@ public static class ArchCommands
     {
         ArchCommand.SignIn, ArchCommand.SignOut, ArchCommand.ServerStatus,
         ArchCommand.GetLatest, ArchCommand.Checkout, ArchCommand.CheckIn, ArchCommand.UndoCheckout,
-        ArchCommand.ScanReferences, ArchCommand.ReferenceHealth,
+        ArchCommand.ScanReferences, ArchCommand.ReferenceHealth, ArchCommand.RepairReference,
         ArchCommand.Status, ArchCommand.Version, ArchCommand.Revision, ArchCommand.WhereUsed,
     };
 }

@@ -105,6 +105,12 @@ public interface IArchApi
     /// </summary>
     Task<UndoOperationResult> UndoCheckoutAsync(IArchSession session, ManagedFileRef file, string? reason, CancellationToken ct = default);
 
+    /// <summary>Read the server-authoritative checkout state for one stable CAD
+    /// document id. Used by P5C as a fail-closed pre-mutation authorization
+    /// gate; it does not acquire or alter a checkout.</summary>
+    Task<ServerCheckoutStatus> GetCheckoutStatusAsync(
+        IArchSession session, string cadDocumentId, CancellationToken ct = default);
+
     // ---- Authoritative version intelligence (P5B-B) ------------------
 
     /// <summary>

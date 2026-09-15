@@ -52,14 +52,20 @@ file static class OpaqueId
 ///     "contract": "arch-plm.desktop-latest-versions.v1",
 ///     "results": [
 ///       { "cadDocumentId": "&lt;id&gt;", "recognized": true,
-///         "latestFileVersionId": "&lt;fvId&gt;", "latestVersionNumber": 7 },
+///         "latestFileVersionId": "&lt;fvId&gt;", "latestVersionNumber": 7,
+///         "fileSize": 348160, "checksum": "&lt;64 lowercase hex SHA-256&gt;" },
 ///       { "cadDocumentId": "&lt;id&gt;", "recognized": false }
 ///     ]
 ///   }
 ///
 ///   - "recognized" MUST be an explicit boolean. Missing / null => the entry is
 ///     malformed and that id fails closed (never treated as Found).
-///   - "recognized": true REQUIRES a non-blank "latestFileVersionId".
+///   - "recognized": true REQUIRES a non-blank "latestFileVersionId", a positive
+///     integer "latestVersionNumber", a non-negative safe-integer "fileSize",
+///     and a "checksum" that is EXACTLY 64 lowercase hexadecimal characters
+///     (canonical SHA-256, no prefix, no whitespace). Any missing / malformed
+///     integrity field => that id is MalformedResponse -> UNKNOWN VERSION. The
+///     checksum is NEVER trimmed or lower-cased into validity.
 ///   - "recognized": false (or an id absent from "results") means the tenant
 ///     has no such CadDocument -> that id is UNKNOWN VERSION.
 ///   - A "cadDocumentId" that appears more than once makes the authoritative
@@ -328,7 +334,25 @@ public sealed class HttpLatestVersionProbe : ILatestVersionProbe
                 continue;
             }
 
-            byId[id] = LatestVersionResult.Found(id, fvId);
+            // A recognized:true result MUST carry a valid version number AND
+            // canonical SERVER-authoritative integrity metadata (P5C-B). Any
+            // missing / out-of-range / non-canonical field fails that id closed
+            // to MalformedResponse -> UNKNOWN VERSION. The checksum is used
+            // VERBATIM - never trimmed, never lower-cased into validity.
+            if (r.LatestVersionNumber is not { } versionNumber || versionNumber < 1)
+            {
+                byId[id] = LatestVersionResult.Failure(id, LatestVersionOutcome.MalformedResponse);
+                continue;
+            }
+            if (r.FileSize is not { } fileSize
+                || !FileVersionIntegrity.IsRepresentableFileSize(fileSize)
+                || !FileVersionIntegrity.IsCanonicalSha256(r.Checksum))
+            {
+                byId[id] = LatestVersionResult.Failure(id, LatestVersionOutcome.MalformedResponse);
+                continue;
+            }
+
+            byId[id] = LatestVersionResult.Found(id, fvId, fileSize, r.Checksum!);
         }
 
         foreach (var id in ambiguous)
@@ -378,5 +402,7 @@ public sealed class HttpLatestVersionProbe : ILatestVersionProbe
         string CadDocumentId = "",
         bool? Recognized = null,
         string? LatestFileVersionId = null,
-        int? LatestVersionNumber = null);
+        int? LatestVersionNumber = null,
+        long? FileSize = null,
+        string? Checksum = null);
 }

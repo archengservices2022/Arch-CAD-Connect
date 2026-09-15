@@ -55,6 +55,11 @@ public sealed class CheckoutHttpClient
             {
                 throw Server("checkout response failed shape check");
             }
+            // ROUND 5 (Codex HIGH): this is always a "this checkout is now
+            // (or already) mine, for the document I asked about" result -
+            // require the server's own echoed cadDocumentId to exactly match
+            // the one requested, fail closed otherwise.
+            RequireMatchingCadDocumentId(cadDocumentId, dto.Checkout.CadDocumentId);
             return new CheckoutResult(
                 Kind: string.Equals(dto.Status, "already-mine", StringComparison.Ordinal)
                     ? CheckoutOutcome.AlreadyMine
@@ -87,6 +92,28 @@ public sealed class CheckoutHttpClient
             "locked" => ServerCheckoutState.Locked,
             _ => ServerCheckoutState.Available,
         };
+
+        // Fail closed at the boundary: an authoritative "mine" response is only
+        // usable if it carries a COMPLETE checkout identity. A "mine" without a
+        // non-blank checkout id and base fileVersionId is a malformed response -
+        // never accept a partial "mine".
+        if (state == ServerCheckoutState.Mine)
+        {
+            if (string.IsNullOrWhiteSpace(dto?.Checkout?.Id)
+                || string.IsNullOrWhiteSpace(dto?.Checkout?.BaseFileVersionId))
+            {
+                throw Server("checkout status reported 'mine' without a complete checkout identity");
+            }
+            // ROUND 5 (Codex HIGH - checkout authority must bind to exact
+            // parent cadDocumentId): the DTO carries the server's own echoed
+            // cadDocumentId but it was previously discarded here. A malformed
+            // / inconsistent response with valid-looking checkout/base ids for
+            // the WRONG parent could otherwise be accepted as authority for
+            // THIS document. Require exact ordinal equality; never normalize
+            // or trim and accept.
+            RequireMatchingCadDocumentId(cadDocumentId, dto?.Checkout?.CadDocumentId);
+        }
+
         return new ServerCheckoutStatus(
             state,
             dto?.Checkout?.CheckedOutBy?.Name,
@@ -211,6 +238,28 @@ public sealed class CheckoutHttpClient
 
     private static ArchApiException Server(string diagnostic) => new(
         ArchApiFailureKind.Server, "Arch PLM returned an unexpected response. Please try again.", diagnostic: diagnostic);
+
+    /// <summary>
+    /// ROUND 5 (Codex HIGH - checkout authority must bind to exact parent
+    /// cadDocumentId): for a Mine / checked-out-by-me result, the server's own
+    /// echoed <c>checkout.cadDocumentId</c> MUST be present, non-blank, carry
+    /// no leading/trailing whitespace, and be ORDINALLY equal to
+    /// <paramref name="requestedCadDocumentId"/> - the id THIS client asked
+    /// about, never inferred any other way. Missing, padded, malformed, or
+    /// mismatched all fail closed identically as malformed/inconsistent
+    /// server authority. The value is never trimmed or normalized before
+    /// comparing - a padded id is rejected, never silently accepted after
+    /// trimming.
+    /// </summary>
+    private static void RequireMatchingCadDocumentId(string requestedCadDocumentId, string? echoedCadDocumentId)
+    {
+        if (string.IsNullOrWhiteSpace(echoedCadDocumentId)
+            || echoedCadDocumentId != echoedCadDocumentId.Trim()
+            || !string.Equals(echoedCadDocumentId, requestedCadDocumentId, StringComparison.Ordinal))
+        {
+            throw Server("checkout response's cadDocumentId is missing, malformed, or does not match the requested document");
+        }
+    }
 
     internal static ArchApiException MapFailure(int code, string body)
     {

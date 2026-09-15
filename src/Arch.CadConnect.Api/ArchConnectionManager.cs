@@ -224,6 +224,13 @@ public sealed class ArchConnectionManager
     public Task<Workspace.UndoOperationResult> UndoCheckoutAsync(ManagedFileRef file, string? reason, CancellationToken ct = default)
         => WithSessionAsync((api, s) => api.UndoCheckoutAsync(s, file, reason, ct));
 
+    /// <summary>Read the authenticated server-authoritative checkout state for
+    /// one stable CAD document id. This is read-only and never checks a file
+    /// out.</summary>
+    public Task<ServerCheckoutStatus> GetCheckoutStatusAsync(
+        string cadDocumentId, CancellationToken ct = default)
+        => WithSessionAsync((api, s) => api.GetCheckoutStatusAsync(s, cadDocumentId, ct));
+
     /// <summary>
     /// P5B-B: fetch the AUTHORITATIVE latest FileVersion identity for each of
     /// <paramref name="cadDocumentIds"/> for the current session. READ-ONLY.

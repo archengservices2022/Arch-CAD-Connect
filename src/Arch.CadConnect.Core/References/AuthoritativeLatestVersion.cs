@@ -40,12 +40,71 @@ public enum LatestVersionOutcome
 }
 
 /// <summary>
-/// The authoritative latest FileVersion identity the Arch PLM server reported
-/// for one stable <see cref="CadDocumentId"/>. Identity is
-/// <c>cadDocumentId</c> + <c>fileVersionId</c> only - nothing else in a
-/// response is ever treated as identity.
+/// The authoritative latest FileVersion the Arch PLM server reported for one
+/// stable <see cref="CadDocumentId"/>. Identity is <c>cadDocumentId</c> +
+/// <c>fileVersionId</c> only - nothing else in a response is ever treated as
+/// identity.
+///
+/// <see cref="FileSize"/> and <see cref="Sha256"/> are the server-authoritative
+/// canonical binary integrity metadata for that exact FileVersion (P5C-B). They
+/// are the ONLY trusted authority for whether a local repair-target binary is
+/// exactly this FileVersion - the mutable local <c>.arch\workspace.json</c> is
+/// NOT. <see cref="FileSize"/> is <c>-1</c> and <see cref="Sha256"/> is empty
+/// when the server did not supply usable integrity metadata; a P5C repair then
+/// fails closed. <see cref="HasCanonicalIntegrity"/> is the single predicate.
 /// </summary>
-public sealed record AuthoritativeLatestVersion(string CadDocumentId, string LatestFileVersionId);
+public sealed record AuthoritativeLatestVersion(
+    string CadDocumentId,
+    string LatestFileVersionId,
+    long FileSize = -1,
+    string Sha256 = "")
+{
+    /// <summary>True only when both the server byte size (&gt;= 0, safe range)
+    ///  and the server checksum (exactly 64 lowercase hex, no prefix, no
+    ///  whitespace) are present and canonical. A malformed value is never
+    ///  trimmed or lower-cased into validity.</summary>
+    public bool HasCanonicalIntegrity =>
+        FileVersionIntegrity.IsRepresentableFileSize(FileSize)
+        && FileVersionIntegrity.IsCanonicalSha256(Sha256);
+}
+
+/// <summary>
+/// Shared, pure validation of Arch FileVersion binary integrity metadata - the
+/// SAME semantics the web repository enforces (`isCanonicalSha256` /
+/// `toSafeFileSize`) and the download endpoint verifies.
+/// </summary>
+public static class FileVersionIntegrity
+{
+    /// <summary>A canonical Arch content checksum: exactly 64 characters, all
+    ///  lowercase hexadecimal, no <c>sha256:</c> prefix, no whitespace. Null,
+    ///  blank, padded, wrong-length, prefixed, non-hex, or upper-cased =&gt;
+    ///  false. Never normalised.</summary>
+    public static bool IsCanonicalSha256(string? value)
+    {
+        if (value is not { Length: 64 })
+        {
+            return false;
+        }
+        foreach (var c in value)
+        {
+            var isLowerHex = c is (>= '0' and <= '9') or (>= 'a' and <= 'f');
+            if (!isLowerHex)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>A usable byte size: non-negative and within the range the server
+    ///  guarantees (a JavaScript-safe integer), so it round-trips exactly.</summary>
+    public static bool IsRepresentableFileSize(long value) =>
+        value >= 0 && value <= MaxSafeInteger;
+
+    /// <summary>2^53 - 1: the largest integer the server's JSON number can carry
+    ///  without loss. A byte size above it is rejected, never trusted.</summary>
+    public const long MaxSafeInteger = 9007199254740991L;
+}
 
 /// <summary>One authoritative lookup result for one cadDocumentId.</summary>
 public sealed record LatestVersionResult(
@@ -53,9 +112,17 @@ public sealed record LatestVersionResult(
     LatestVersionOutcome Outcome,
     AuthoritativeLatestVersion? Version = null)
 {
-    public static LatestVersionResult Found(string cadDocumentId, string latestFileVersionId) =>
+    /// <summary>
+    /// An authoritative Found result. <paramref name="fileSize"/> /
+    /// <paramref name="sha256"/> are the server-authoritative canonical integrity
+    /// metadata; the defaults (<c>-1</c> / empty) are deliberately non-canonical
+    /// so a P5C repair built on a result that omitted them fails closed rather
+    /// than trusting the mutable local manifest.
+    /// </summary>
+    public static LatestVersionResult Found(
+        string cadDocumentId, string latestFileVersionId, long fileSize = -1, string sha256 = "") =>
         new(cadDocumentId, LatestVersionOutcome.Found,
-            new AuthoritativeLatestVersion(cadDocumentId, latestFileVersionId));
+            new AuthoritativeLatestVersion(cadDocumentId, latestFileVersionId, fileSize, sha256));
 
     public static LatestVersionResult Failure(string cadDocumentId, LatestVersionOutcome outcome) =>
         new(cadDocumentId, outcome == LatestVersionOutcome.Found ? LatestVersionOutcome.MalformedResponse : outcome, null);

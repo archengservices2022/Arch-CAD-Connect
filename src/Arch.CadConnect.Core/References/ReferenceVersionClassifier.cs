@@ -80,16 +80,36 @@ public static class ReferenceVersionClassifier
 
                 reasons.Add($"authoritative latest fileVersionId: {latest}");
 
+                // Server-authoritative canonical integrity metadata (P5C-B).
+                // Carried through verbatim; NEVER trimmed / lower-cased. It is
+                // only meaningful when canonical - the repair planner fails
+                // closed otherwise, and never substitutes the local manifest.
+                var serverSize = result.Version.FileSize;
+                var serverSha = result.Version.Sha256 ?? "";
+                if (result.Version.HasCanonicalIntegrity)
+                {
+                    reasons.Add($"authoritative FileVersion size: {serverSize} bytes; SHA-256: {serverSha}");
+                }
+                else
+                {
+                    reasons.Add("The authoritative response did not carry canonical FileVersion integrity metadata "
+                        + "(size + SHA-256) - a P5C repair of this reference will fail closed.");
+                    serverSize = -1;
+                    serverSha = "";
+                }
+
                 if (string.Equals(latest, pinnedFileVersionId, StringComparison.Ordinal))
                 {
                     reasons.Add("The pinned local version IS the authoritative latest version.");
                     return new ReferenceVersionAssessment(
-                        entry, Applicable: true, PlmVersionStatus.Current, cadDocumentId, latest, reasons);
+                        entry, Applicable: true, PlmVersionStatus.Current, cadDocumentId, latest, reasons,
+                        serverSize, serverSha);
                 }
 
                 reasons.Add("The authoritative latest version DIFFERS from the pinned local version - this reference is out of date.");
                 return new ReferenceVersionAssessment(
-                    entry, Applicable: true, PlmVersionStatus.Stale, cadDocumentId, latest, reasons);
+                    entry, Applicable: true, PlmVersionStatus.Stale, cadDocumentId, latest, reasons,
+                    serverSize, serverSha);
             }
 
             case LatestVersionOutcome.ServerUnavailable:
