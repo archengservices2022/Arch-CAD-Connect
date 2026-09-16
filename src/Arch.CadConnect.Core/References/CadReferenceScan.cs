@@ -53,8 +53,27 @@ public sealed record CadReferenceRoot(
     string AbsolutePath,
     CadDocumentType DocumentType,
     /// <summary>The stable Arch identity of the root, IF its exact path is bound
-    ///  in a verified workspace manifest. Never filename-inferred.</summary>
-    PlmIdentity? Identity);
+    ///  in a workspace manifest entry - VERIFIED OR UNVERIFIED. Never
+    ///  filename-inferred. Diagnostics may still use an Unverified identity
+    ///  (e.g. to show what the manifest currently claims); anything that
+    ///  requires a TRUSTED root binding (P5C repair authorization, P6A
+    ///  automatic Copy Design actions) must additionally check
+    ///  <see cref="IsVerified"/> - a non-null <see cref="Identity"/> alone is
+    ///  NOT proof of a verified binding.</summary>
+    PlmIdentity? Identity,
+    /// <summary>Whether the workspace manifest currently claims this exact
+    ///  root binding was verified. Only meaningful when <see cref="Identity"/>
+    ///  is non-null - a null <see cref="Identity"/> always means "unmanaged
+    ///  root" regardless of this flag. Defaults to <c>true</c> so every caller
+    ///  that predates this field (all of which only ever produced verified
+    ///  root identities) keeps its existing behavior unchanged.</summary>
+    bool IsVerified = true)
+{
+    /// <summary>True only when the root has a manifest-bound identity AND that
+    ///  binding is currently verified - the only root state safe for an
+    ///  automatic Copy Design root action.</summary>
+    public bool IsManagedAndVerified => Identity is not null && IsVerified;
+}
 
 /// <summary>
 /// One direct parent -> child reference edge exactly as Inventor reports it.

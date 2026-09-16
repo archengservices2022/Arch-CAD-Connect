@@ -47,7 +47,8 @@ public sealed class CadReferenceScanner : ICadReferenceScanner
             ?? throw new ArgumentException("The scan root must be an absolute path.", nameof(rootAbsolutePath));
 
         var rootType = CadDocumentTypes.FromPath(rootKey);
-        var rootIdentity = ManifestIdentityFor(rootKey)?.ToPlmIdentity();
+        var rootManifestIdentity = ManifestIdentityFor(rootKey);
+        var rootIdentity = rootManifestIdentity?.ToPlmIdentity();
 
         var references = new List<CadReference>();
         var nodes = new List<CadReferenceNode>();
@@ -152,7 +153,7 @@ public sealed class CadReferenceScanner : ICadReferenceScanner
         }
 
         return new CadReferenceScan(
-            new CadReferenceRoot(rootKey, rootType, rootIdentity),
+            new CadReferenceRoot(rootKey, rootType, rootIdentity, rootManifestIdentity?.IsVerified ?? false),
             references,
             nodes,
             _clock());

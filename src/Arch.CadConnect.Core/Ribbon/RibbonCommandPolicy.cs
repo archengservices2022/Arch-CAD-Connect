@@ -86,6 +86,14 @@ public static class RibbonCommandPolicy
                 && IsScannableDocument(document)
                 && CheckoutStateMachine.IsWriteRole(userRole),
 
+            // P6A: read-only plan + preview, zero mutation - same gate as
+            // Scan References / Reference Health (connected + a saved,
+            // supported document). Not role-gated: nothing is written, so a
+            // VIEWER may preview too. A future EXECUTION command (not part of
+            // P6A) would need write-role gating; preview itself does not.
+            ArchCommand.CopyDesignPreview => connection == ConnectionState.Connected
+                && IsScannableDocument(document),
+
             _ => false,
         };
     }

@@ -26,6 +26,7 @@ public enum ArchCommand
     ScanReferences, // P5A
     ReferenceHealth, // P5B-A
     RepairReference, // P5C
+    CopyDesignPreview, // P6A - read-only plan + preview only, zero mutation
     Status,
     Version,
     Revision,
@@ -54,6 +55,7 @@ public static class ArchCommands
         ArchCommand.ScanReferences => true, // P5A
         ArchCommand.ReferenceHealth => true, // P5B-A
         ArchCommand.RepairReference => true, // P5C
+        ArchCommand.CopyDesignPreview => true, // P6A (preview only - no execution command exists)
         _ => false,
     };
 
@@ -67,6 +69,7 @@ public static class ArchCommands
         ArchCommand.ScanReferences => true,
         ArchCommand.ReferenceHealth => true,
         ArchCommand.RepairReference => true,
+        ArchCommand.CopyDesignPreview => true,
         ArchCommand.Status => true,
         ArchCommand.Version => true,
         ArchCommand.Revision => true,
@@ -90,6 +93,7 @@ public static class ArchCommands
         ArchCommand.ScanReferences => "Scan References",
         ArchCommand.ReferenceHealth => "Reference Health",
         ArchCommand.RepairReference => "Repair Reference",
+        ArchCommand.CopyDesignPreview => "Copy Design Preview",
         ArchCommand.Status => "Status",
         ArchCommand.Version => "Version",
         ArchCommand.Revision => "Revision",
@@ -127,6 +131,7 @@ public static class ArchCommands
                 ArchCommand.ScanReferences => "Report the references Inventor knows about for the active document. Read-only - never changes, saves, or repairs anything.",
                 ArchCommand.ReferenceHealth => "Diagnose the local health of each reference: resolved / missing, inside / outside the workspace, managed / unmanaged. Read-only - never changes or repairs anything.",
                 ArchCommand.RepairReference => "Repair ONE stale managed reference of the active document by repointing it to the authoritative latest version - with an explicit preview and confirmation. Never saves, checks out, or checks in.",
+                ArchCommand.CopyDesignPreview => "Preview a Copy Design plan for the active document: discovers its dependency structure and proposes COPY / REUSE for each node. Read-only - never copies, renames, saves, or replaces anything.",
                 _ => command.DisplayName(),
             }
             : $"{command.DisplayName()} is not available yet. Coming in a later release.";
@@ -140,6 +145,7 @@ public static class ArchCommands
         ArchCommand.SignIn, ArchCommand.SignOut, ArchCommand.ServerStatus,
         ArchCommand.GetLatest, ArchCommand.Checkout, ArchCommand.CheckIn, ArchCommand.UndoCheckout,
         ArchCommand.ScanReferences, ArchCommand.ReferenceHealth, ArchCommand.RepairReference,
+        ArchCommand.CopyDesignPreview,
         ArchCommand.Status, ArchCommand.Version, ArchCommand.Revision, ArchCommand.WhereUsed,
     };
 }

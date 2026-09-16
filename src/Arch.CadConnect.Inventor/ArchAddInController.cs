@@ -4,6 +4,7 @@ using Arch.CadConnect.Api;
 using Arch.CadConnect.Api.Workspace;
 using Arch.CadConnect.Core;
 using Arch.CadConnect.Core.Connection;
+using Arch.CadConnect.Core.CopyDesign;
 using Arch.CadConnect.Core.Documents;
 using Arch.CadConnect.Core.Files;
 using Arch.CadConnect.Core.References;
@@ -176,6 +177,10 @@ internal sealed class ArchAddInController : IDisposable
 
             case ArchCommand.RepairReference:
                 RunRepairReference();
+                break;
+
+            case ArchCommand.CopyDesignPreview:
+                RunCopyDesignPreview();
                 break;
 
             default:
@@ -393,6 +398,56 @@ internal sealed class ArchAddInController : IDisposable
         var text = ReferenceVersionTextReport.Render(report);
         using var dialog = new ScanResultDialog(
             $"{ArchAddInInfo.DisplayName} - Reference Health ({report.OverallStatusLabel})", text);
+        dialog.ShowDialog(new Win32Owner(SafeMainHwnd()));
+    }
+
+    // ---- P6A: Copy Design plan + preview (READ-ONLY, zero mutation) -----
+
+    /// <summary>
+    /// Builds a P6A Copy Design plan for the active document and shows it as a
+    /// read-only preview. This command NEVER copies, renames, saves, replaces
+    /// a reference, checks anything out/in, or creates a FileVersion / CAD
+    /// document - it only reuses the EXISTING P5A scanner (COM read-only) and
+    /// hands the result to the COM-free <see cref="CopyDesignPlanner"/>. There
+    /// is no "Execute Copy Design" command in P6A.
+    /// </summary>
+    private void RunCopyDesignPreview()
+    {
+        if (!TryScanActiveDocument("Copy Design Preview", out var scan))
+        {
+            return;
+        }
+
+        using var input = new CopyDesignPreviewDialog();
+        if (input.ShowDialog(new Win32Owner(SafeMainHwnd())) != DialogResult.OK)
+        {
+            return;
+        }
+
+        IDestinationNameRule nameRule;
+        try
+        {
+            nameRule = new TokenReplaceNameRule(input.SourceToken, input.DestinationToken);
+        }
+        catch (ArgumentException ex)
+        {
+            Error($"Copy Design Preview could not build a naming rule: {ex.Message}");
+            return;
+        }
+
+        // The ONLY filesystem read this command performs: a best-effort,
+        // read-only existence check of each proposed destination, scoped to
+        // the destination folder the engineer just chose. Never a write.
+        var plan = CopyDesignPlanner.Plan(
+            scan,
+            nameRule,
+            input.DestinationFolder,
+            destinationExists: SafeFileExists);
+
+        var text = CopyDesignPlanTextReport.Render(plan);
+        var status = plan.IsExecutable ? "PREVIEW" : "PREVIEW - NOT EXECUTABLE";
+        using var dialog = new ScanResultDialog(
+            $"{ArchAddInInfo.DisplayName} - Copy Design Preview ({status})", text);
         dialog.ShowDialog(new Win32Owner(SafeMainHwnd()));
     }
 
