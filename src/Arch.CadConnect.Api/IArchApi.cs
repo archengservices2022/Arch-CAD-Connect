@@ -126,6 +126,27 @@ public interface IArchApi
     Task<LatestVersionLookup> GetLatestVersionsAsync(
         IArchSession session, IReadOnlyCollection<string> cadDocumentIds, CancellationToken ct = default);
 
+    // ---- Copy Design apply / materialization (P6C) ---------------------
+
+    /// <summary>
+    /// Reserve server-side identities + immutable lineage for a confirmed P6A
+    /// Copy Design plan, via the EXISTING P6B contract
+    /// (<c>POST /api/desktop/copy-design/apply</c>). Never accesses
+    /// PostgreSQL directly. The caller's <paramref name="request"/> already
+    /// carries the SAME idempotency key for every retry of one logical
+    /// attempt - this method never mints one itself.
+    /// </summary>
+    Task<Core.CopyDesign.Apply.CopyDesignReservationResponse> ApplyCopyDesignAsync(
+        IArchSession session, Core.CopyDesign.Apply.CopyDesignApplyRequest request, CancellationToken ct = default);
+
+    /// <summary>
+    /// Attempt to materialize the FIRST FileVersion for a P6B-reserved,
+    /// zero-FileVersion CadDocument from a verified local file, via the
+    /// dedicated <see cref="CopyDesign.CopyDesignMaterializeHttpClient"/>.
+    /// </summary>
+    Task<Core.CopyDesign.Apply.CopyDesignMaterializationResult> MaterializeFirstFileVersionAsync(
+        IArchSession session, Core.CopyDesign.Apply.CopyDesignMaterializeRequest request, CancellationToken ct = default);
+
     // ---- future scope (declared, not implemented) ---------------------
 
     Task<PlmDocumentStatusDto> GetDocumentStatusAsync(IArchSession session, string cadDocumentId, CancellationToken ct = default);

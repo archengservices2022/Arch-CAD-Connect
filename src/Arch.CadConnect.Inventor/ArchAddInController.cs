@@ -44,6 +44,13 @@ internal sealed class ArchAddInController : IDisposable
     ///  every ribbon refresh; the destructive path re-checks it fully.</summary>
     private readonly UndoTargetMemory _undoTarget = new();
 
+    /// <summary>P6C: ONE guard for the controller's whole lifetime - a
+    ///  double-click or a second "Apply Copy Design" invocation while one is
+    ///  already running must be refused, not queued. In-process only; see
+    ///  <see cref="Core.CopyDesign.Apply.CopyDesignApplyOperationGuard"/>'s own
+    ///  doc comment for why a single global guard is sufficient here.</summary>
+    private readonly Core.CopyDesign.Apply.CopyDesignApplyOperationGuard _copyDesignApplyGuard = new();
+
     private bool _disposed;
 
     public ArchAddInController(InventorApi.Application application)
@@ -444,11 +451,162 @@ internal sealed class ArchAddInController : IDisposable
             input.DestinationFolder,
             destinationExists: SafeFileExists);
 
+        // Round 6: give the engineer the ONLY supported way to resolve a
+        // NeedsDecision node whose sole blocker is an unavailable library/
+        // shared classification signal - never applied automatically, never
+        // pre-selected (see CopyDesignDecisionsDialog). Every OTHER
+        // NeedsDecision reason (unresolved, unmanaged, unverified, a
+        // conflict, an unsafe drawing association, an unsafe destination)
+        // has no eligible node here and stays exactly as before: shown in
+        // the read-only report, with no apply surface.
+        IReadOnlyDictionary<string, CopyDesignAction>? appliedDecisions = null;
+        if (!plan.IsExecutable)
+        {
+            var eligible = plan.Nodes.Where(CopyDesignExplicitDecisionEligibility.IsEligibleForExplicitDecision).ToArray();
+            if (eligible.Length > 0)
+            {
+                using var decisions = new CopyDesignDecisionsDialog(eligible);
+                if (decisions.ShowDialog(new Win32Owner(SafeMainHwnd())) == DialogResult.OK)
+                {
+                    appliedDecisions = decisions.Decisions.AsDictionary();
+                    plan = CopyDesignPlanner.Plan(
+                        scan,
+                        nameRule,
+                        input.DestinationFolder,
+                        destinationExists: SafeFileExists,
+                        explicitDecisions: appliedDecisions);
+                }
+            }
+        }
+
+        // Round 8: if the ONLY remaining blocker is drawing-association
+        // completeness (drawings cannot be proven), offer the EXPLICIT
+        // "model files only" acknowledgement. Probing with
+        // acknowledgeModelFilesOnly is safe - CopyDesignPlanner.Plan is pure
+        // and performs no mutation - and since it waives ONLY that one
+        // blocker (see CopyDesignPlanner's own doc comment), a probe plan
+        // that becomes executable PROVES completeness was the sole
+        // remaining problem; any OTHER unresolved problem (NeedsDecision, a
+        // collision, an unsafe edge, a missing identity) leaves the probe
+        // non-executable too, and no acknowledgement is offered at all.
+        if (!plan.IsExecutable)
+        {
+            var probe = CopyDesignPlanner.Plan(
+                scan,
+                nameRule,
+                input.DestinationFolder,
+                destinationExists: SafeFileExists,
+                explicitDecisions: appliedDecisions,
+                acknowledgeModelFilesOnly: true);
+            if (probe.IsExecutable)
+            {
+                using var modelOnly = new CopyDesignModelFilesOnlyDialog();
+                if (modelOnly.ShowDialog(new Win32Owner(SafeMainHwnd())) == DialogResult.OK)
+                {
+                    plan = probe;
+                }
+            }
+        }
+
         var text = CopyDesignPlanTextReport.Render(plan);
         var status = plan.IsExecutable ? "PREVIEW" : "PREVIEW - NOT EXECUTABLE";
-        using var dialog = new ScanResultDialog(
-            $"{ArchAddInInfo.DisplayName} - Copy Design Preview ({status})", text);
-        dialog.ShowDialog(new Win32Owner(SafeMainHwnd()));
+        using (var dialog = new ScanResultDialog($"{ArchAddInInfo.DisplayName} - Copy Design Preview ({status})", text))
+        {
+            dialog.ShowDialog(new Win32Owner(SafeMainHwnd()));
+        }
+
+        // P6C: no apply surface at all for a non-executable plan - the
+        // engineer must fix the plan (rename tokens, resolve NeedsDecision,
+        // etc.) and preview again.
+        if (!plan.IsExecutable)
+        {
+            return;
+        }
+
+        RunCopyDesignApply(plan);
+    }
+
+    /// <summary>
+    /// P6C: the MANDATORY explicit confirmation + apply step, reachable ONLY
+    /// from an EXECUTABLE preview (see the caller). Never invoked
+    /// automatically. A fresh idempotency key is minted for THIS confirmed
+    /// attempt (never reused across a genuinely new confirmation) via
+    /// <see cref="Core.CopyDesign.Apply.CopyDesignApplyAttempt.StartNewAttempt"/>.
+    /// All orchestration (mapping, revalidation, reservation, response
+    /// validation, execution order, journal/cleanup, verification,
+    /// materialization) is <see cref="Core.CopyDesign.Apply.CopyDesignApplyOrchestrator"/>
+    /// - this method only wires the REAL Inventor/HTTP adapters to it and
+    /// shows the result. Ends at READY FOR MANUAL INVENTOR TEST (or a clear
+    /// failure/cleanup report) - it never auto-accepts or releases anything.
+    /// </summary>
+    private void RunCopyDesignApply(CopyDesignPlan plan)
+    {
+        using var confirm = new CopyDesignApplyConfirmDialog(plan);
+        if (confirm.ShowDialog(new Win32Owner(SafeMainHwnd())) != DialogResult.OK)
+        {
+            return;
+        }
+
+        if (_connection.State != ConnectionState.Connected)
+        {
+            Error("Sign in to Arch PLM before applying a Copy Design plan.");
+            return;
+        }
+
+        var attempt = Core.CopyDesign.Apply.CopyDesignApplyAttempt.StartNewAttempt();
+        var orchestrator = new Core.CopyDesign.Apply.CopyDesignApplyOrchestrator(
+            _copyDesignApplyGuard,
+            new ApplyCopyDesignReservationAdapter(_connection),
+            new Inventor.CopyDesign.InventorCopyDesignPhysicalCopier(_application),
+            new Inventor.CopyDesign.InventorCopyDesignReferenceRewirer(_application),
+            new Inventor.CopyDesign.InventorCopyDesignVerifier(_application, new Core.CopyDesign.Apply.CopyDesignFileHasher()),
+            new MaterializeCopyDesignAdapter(_connection),
+            new Core.CopyDesign.Apply.CopyDesignFileHasher(),
+            sourceExists: File.Exists,
+            destinationExists: File.Exists,
+            deleteFile: path => File.Delete(path),
+            // HIGH 2 fix: Core has no HTTP dependency, so the ONLY place
+            // that can classify a reservation-call exception as TRANSIENT
+            // (worth the orchestrator's bounded, same-key, same-request
+            // retry) versus a deterministic business/4xx rejection (never
+            // retried) is here, where the real ArchApiException is visible.
+            isTransientReservationFailure: ex => ex is ArchApiException apiEx && apiEx.IsServerUnavailable);
+
+        Core.CopyDesign.Apply.CopyDesignApplyOperationResult? result = null;
+        RunBackground(
+            async ct => result = await orchestrator.ExecuteAsync(plan, attempt.IdempotencyKey, label: null, ct),
+            "Applying Copy Design",
+            onDone: () =>
+            {
+                if (result is null)
+                {
+                    return;
+                }
+                var text = Core.CopyDesign.Apply.CopyDesignApplyResultTextReport.Render(result);
+                using var dialog = new ScanResultDialog($"{ArchAddInInfo.DisplayName} - Apply Copy Design ({result.Outcome})", text);
+                dialog.ShowDialog(new Win32Owner(SafeMainHwnd()));
+            },
+            timeout: TimeSpan.FromMinutes(30));
+    }
+
+    /// <summary>Thin adapter: <see cref="ArchConnectionManager"/> already owns
+    ///  the current session/API factory - this just satisfies the Core-level
+    ///  seam without Core ever depending on the Api project's connection
+    ///  machinery.</summary>
+    private sealed class ApplyCopyDesignReservationAdapter(ArchConnectionManager connection)
+        : Core.CopyDesign.Apply.ICopyDesignReservationClient
+    {
+        public Task<Core.CopyDesign.Apply.CopyDesignReservationResponse> ApplyAsync(
+            Core.CopyDesign.Apply.CopyDesignApplyRequest request, CancellationToken ct) =>
+            connection.ApplyCopyDesignAsync(request, ct);
+    }
+
+    private sealed class MaterializeCopyDesignAdapter(ArchConnectionManager connection)
+        : Core.CopyDesign.Apply.ICopyDesignMaterializer
+    {
+        public Task<Core.CopyDesign.Apply.CopyDesignMaterializationResult> MaterializeFirstFileVersionAsync(
+            Core.CopyDesign.Apply.CopyDesignMaterializeRequest request, CancellationToken ct) =>
+            connection.MaterializeFirstFileVersionAsync(request, ct);
     }
 
     // ---- P5C: controlled reference repair --------------------------

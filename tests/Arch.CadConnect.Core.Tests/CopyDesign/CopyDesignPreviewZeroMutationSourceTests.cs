@@ -74,6 +74,64 @@ public class CopyDesignPreviewZeroMutationSourceTests
         yield return new object[] { "src/Arch.CadConnect.Inventor/Ui/CopyDesignPreviewDialog.cs" };
         yield return new object[] { "src/Arch.CadConnect.Core/CopyDesign/CopyDesignPlanner.cs" };
         yield return new object[] { "src/Arch.CadConnect.Core/CopyDesign/CopyDesignPlanTextReport.cs" };
+        // Round 6 / Round 8: the NeedsDecision-resolution and model-files-only
+        // dialogs are part of the SAME zero-mutation preview flow - they must
+        // never touch the filesystem either.
+        yield return new object[] { "src/Arch.CadConnect.Inventor/Ui/CopyDesignDecisionsDialog.cs" };
+        yield return new object[] { "src/Arch.CadConnect.Inventor/Ui/CopyDesignModelFilesOnlyDialog.cs" };
+    }
+
+    [Fact]
+    public void The_model_files_only_dialog_never_pre_selects_an_AcceptButton()
+    {
+        // Round 8: "No pre-selected/default Yes" - pressing Enter must never
+        // be mistaken for an affirmative acknowledgement.
+        var source = ReadSource("src", "Arch.CadConnect.Inventor", "Ui", "CopyDesignModelFilesOnlyDialog.cs");
+
+        Assert.DoesNotContain("AcceptButton =", source, StringComparison.Ordinal);
+    }
+
+    // ---- CODEX FINAL AUDIT ROUND 1, MEDIUM 1: a Dirty source is rejected
+    //      regardless of who opened it - there is no dedicated WinForms/COM
+    //      test harness for this repo (see this class's own doc comment), so
+    //      this is the same established SOURCE-LEVEL guard pattern. --------
+
+    [Fact]
+    public void The_physical_copier_checks_Dirty_UNCONDITIONALLY_not_only_when_the_source_was_already_open()
+    {
+        var source = ReadSource("src", "Arch.CadConnect.Inventor", "CopyDesign", "InventorCopyDesignPhysicalCopier.cs");
+
+        // The fix: the Dirty check must be its own, unconditional guard -
+        // never re-gated behind "wasAlreadyOpen &&" (a regression would
+        // silently let a self-opened-but-Dirty document through).
+        Assert.Contains("if (document.Dirty)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("if (wasAlreadyOpen && document.Dirty)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_physical_copier_never_saves_the_source_document()
+    {
+        var source = ReadSource("src", "Arch.CadConnect.Inventor", "CopyDesign", "InventorCopyDesignPhysicalCopier.cs");
+
+        Assert.DoesNotContain("document.Save(", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("document.Save2(", source, StringComparison.Ordinal);
+        // The only close of a document THIS class itself opened must be
+        // SkipSave - never persisting whatever state the source was in.
+        Assert.Contains("document.Close(SkipSave: true)", source, StringComparison.Ordinal);
+    }
+
+    // ---- CODEX FINAL AUDIT ROUND 1, HIGH 4: never SaveAs directly onto the
+    //      unclaimed final destination - source-level guard for the same
+    //      untestable-COM reason. -------------------------------------------
+
+    [Fact]
+    public void The_physical_copier_never_calls_SaveAs_with_the_final_destination_directly()
+    {
+        var source = ReadSource("src", "Arch.CadConnect.Inventor", "CopyDesign", "InventorCopyDesignPhysicalCopier.cs");
+
+        Assert.DoesNotContain("SaveAs(destination,", source, StringComparison.Ordinal);
+        Assert.Contains("SaveAs(tempPath,", source, StringComparison.Ordinal);
+        Assert.Contains("CopyDesignAtomicPromotion.PromoteToFinal(tempPath, destination)", source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -96,5 +154,20 @@ public class CopyDesignPreviewZeroMutationSourceTests
         // The one permitted filesystem touch is the read-only existence
         // check wired in as `destinationExists`.
         Assert.Contains("destinationExists: SafeFileExists", body, StringComparison.Ordinal);
+    }
+
+    // ---- CODEX ROUND 3, HIGH, item 4: IPT is unaffected by the occurrence-
+    //      enumeration-success requirement - the gatherer must compute it as
+    //      "not an IAM -> always true", never gated behind enumeration that
+    //      an IPT never performs. COM-only, no dedicated test harness (see
+    //      this class's own doc comment), hence the same source-level guard
+    //      pattern. -------------------------------------------------------
+
+    [Fact]
+    public void The_verifier_reports_occurrence_enumeration_as_trivially_succeeded_for_a_non_IAM_node()
+    {
+        var source = ReadSource("src", "Arch.CadConnect.Inventor", "CopyDesign", "InventorCopyDesignVerifier.cs");
+
+        Assert.Contains("node.DocumentType != CadDocumentType.Iam || occurrencesGathered", source, StringComparison.Ordinal);
     }
 }

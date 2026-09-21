@@ -231,6 +231,18 @@ public sealed class ArchConnectionManager
         string cadDocumentId, CancellationToken ct = default)
         => WithSessionAsync((api, s) => api.GetCheckoutStatusAsync(s, cadDocumentId, ct));
 
+    /// <summary>P6C: reserve server-side identities + lineage for a confirmed
+    ///  Copy Design apply request via the existing P6B contract.</summary>
+    public Task<Core.CopyDesign.Apply.CopyDesignReservationResponse> ApplyCopyDesignAsync(
+        Core.CopyDesign.Apply.CopyDesignApplyRequest request, CancellationToken ct = default)
+        => WithSessionAsync((api, s) => api.ApplyCopyDesignAsync(s, request, ct));
+
+    /// <summary>P6C: attempt to materialize the first FileVersion for a
+    ///  P6B-reserved CadDocument from a verified local file.</summary>
+    public Task<Core.CopyDesign.Apply.CopyDesignMaterializationResult> MaterializeFirstFileVersionAsync(
+        Core.CopyDesign.Apply.CopyDesignMaterializeRequest request, CancellationToken ct = default)
+        => WithSessionAsync((api, s) => api.MaterializeFirstFileVersionAsync(s, request, ct));
+
     /// <summary>
     /// P5B-B: fetch the AUTHORITATIVE latest FileVersion identity for each of
     /// <paramref name="cadDocumentIds"/> for the current session. READ-ONLY.

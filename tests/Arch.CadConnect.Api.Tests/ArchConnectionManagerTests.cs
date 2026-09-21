@@ -44,6 +44,14 @@ public class ArchConnectionManagerTests
 
         public Task<ResolvedCadDocument> ResolveCadDocumentAsync(IArchSession s, CadDocumentLookup lu, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Resolve");
         public Task<MaterializationReport> GetLatestAsync(IArchSession s, GetLatestRequest r, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Get Latest");
+        public Task<Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignReservationResponse> ApplyCopyDesignAsync(
+            IArchSession s, Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignApplyRequest request, CancellationToken ct = default) =>
+            throw ArchApiException.NotImplemented("Copy Design apply");
+
+        public Task<Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignMaterializationResult> MaterializeFirstFileVersionAsync(
+            IArchSession s, Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignMaterializeRequest request, CancellationToken ct = default) =>
+            throw ArchApiException.NotImplemented("Copy Design materialization");
+
         public Task<PlmDocumentStatusDto> GetDocumentStatusAsync(IArchSession s, string id, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Status");
         public Task<Arch.CadConnect.Api.Workspace.CheckoutOperationResult> CheckoutAsync(IArchSession s, ManagedFileRef f, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Checkout");
         public Task<Arch.CadConnect.Api.Workspace.CheckInOperationResult> CheckInAsync(IArchSession s, ManagedFileRef f, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Check In");

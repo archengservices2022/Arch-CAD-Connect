@@ -56,16 +56,77 @@ namespace Arch.CadConnect.Core.CopyDesign;
 /// (a bad DocumentType, or a nonblank-but-unresolvable path) is surfaced as
 /// an explicit, deterministic warning and forces the plan non-executable -
 /// never silently treated as "no drawing exists".
+///
+/// Round 6 (P6C manual acceptance follow-up) adds the ONLY supported way to
+/// resolve a <see cref="CopyDesignAction.NeedsDecision"/> node that exists
+/// SOLELY because no library/shared classification signal is available: the
+/// optional <c>explicitDecisions</c> parameter, keyed by the node's OWN
+/// STABLE <c>cadDocumentId</c> - NEVER by display row, path, or file name.
+/// This does NOT make the planner guess: the lookup happens at the EXACT
+/// same single decision point that already refuses to guess (see
+/// <see cref="DecideNode"/>'s classification switch) - every OTHER
+/// <c>NeedsDecision</c> reason (unresolved, unmanaged, unverified,
+/// noncanonical id, an identity/path conflict, an unsafe drawing
+/// association, self-overwrite, an unsafe destination) is decided BEFORE
+/// that point and can NEVER be affected by this dictionary, no matter what
+/// it contains for that node's id - there is no way to "override" a
+/// structural safety failure. See <see cref="CopyDesignExplicitDecisionEligibility"/>
+/// for the same eligibility test exposed to callers (e.g. the Ribbon UI) so
+/// they can show a decision control ONLY where it can actually take effect.
+///
+/// EXCLUDE (Round 6): choosing EXCLUDE for a node whose reference is still
+/// depended on by any surviving (Copy/Reuse) parent leaves that edge
+/// <see cref="CopyDesignEdgeDisposition.UnresolvedOrUnsafe"/> - Round 6 also
+/// closes a latent gap where <c>IsExecutable</c> never actually checked edge
+/// disposition (unreachable before EXCLUDE existed): an
+/// <c>UnresolvedOrUnsafe</c> edge now ALWAYS makes the plan non-executable,
+/// with an explicit warning naming the edge - EXCLUDE is only ever "safe" in
+/// the executable sense for a node nothing still resolves through.
+///
+/// Round 8 (P6C acceptance follow-up) adds the ONLY supported way to waive
+/// the drawing-association-INCOMPLETE blocker (see
+/// <c>drawingAssociationComplete</c> below): the optional
+/// <c>acknowledgeModelFilesOnly</c> flag. The DEFAULT remains exactly as
+/// before - if drawing authority is unavailable, the plan stays NOT
+/// executable, full stop. Setting this flag to <c>true</c> waives ONLY that
+/// one specific blocker; it changes NOTHING else - every other safety check
+/// (<c>anyNodeBlocksExecution</c> i.e. NeedsDecision, duplicate/local-
+/// collision destinations, invalid drawing-association EVIDENCE, an
+/// <c>UnresolvedOrUnsafe</c> edge, an incomplete scan) still fails the plan
+/// closed exactly as it always has, and the pre-existing "authority was
+/// unavailable" warning is still emitted, never suppressed. This does not
+/// touch which nodes are discovered or how they are decided - an actual
+/// IDW/DWG node already in the plan is never dropped, hidden, or force-
+/// excluded by this flag; it is decided by the SAME logic as always, and
+/// (independent of this flag) <see cref="Apply.CopyDesignApplyRequestMapper"/>
+/// already never maps an IDW/DWG node into a physical operation regardless of
+/// its ProposedAction - P6D still owns drawings, untouched.
 /// </summary>
 public static class CopyDesignPlanner
 {
+    /// <param name="explicitDecisions">Keyed by STABLE cadDocumentId.
+    ///  Consulted ONLY at the one classification-unknown decision point -
+    ///  see the class doc comment. Never mutates, never guesses; an id with
+    ///  no matching entry (or a value that is not Copy/Reuse/Exclude)
+    ///  behaves exactly as if this parameter were omitted.</param>
+    /// <param name="acknowledgeModelFilesOnly">Round 8: an explicit,
+    ///  affirmative engineer acknowledgement that this Copy Design operation
+    ///  covers model files (IAM/IPT) only and that any IDW/DWG association
+    ///  that cannot be proven will NOT be copied. Defaults to <c>false</c> -
+    ///  the safe default (drawing-authority-incomplete blocks execution) is
+    ///  unchanged unless a caller explicitly opts in for THIS recomputation.
+    ///  Waives ONLY the drawing-association-completeness blocker; see the
+    ///  class doc comment ("Round 8") for the exact, narrow scope of what
+    ///  this can and cannot waive.</param>
     public static CopyDesignPlan Plan(
         CadReferenceScan scan,
         IDestinationNameRule nameRule,
         string destinationWorkspaceRoot,
         IComponentClassificationSource? classificationSource = null,
         IDrawingAssociationSource? drawingSource = null,
-        Func<string, bool>? destinationExists = null)
+        Func<string, bool>? destinationExists = null,
+        IReadOnlyDictionary<string, CopyDesignAction>? explicitDecisions = null,
+        bool acknowledgeModelFilesOnly = false)
     {
         ArgumentNullException.ThrowIfNull(scan);
         ArgumentNullException.ThrowIfNull(nameRule);
@@ -395,7 +456,7 @@ public static class CopyDesignPlanner
             }
             nodesByKey[key] = conflictsByKey.TryGetValue(key, out var conflictReasons)
                 ? ConflictedNode(draft, conflictReasons)
-                : DecideNode(draft, nameRule, destinationWorkspaceRoot, classificationSource, forcedAction: null);
+                : DecideNode(draft, nameRule, destinationWorkspaceRoot, classificationSource, forcedAction: null, explicitDecisions: explicitDecisions);
         }
 
         foreach (var key in order)
@@ -470,7 +531,7 @@ public static class CopyDesignPlanner
             // gaining even ONE owner immediately subjects it to full
             // owner-consensus safety above.
 
-            nodesByKey[key] = DecideNode(draft, nameRule, destinationWorkspaceRoot, classificationSource, forcedAction, forcedReason);
+            nodesByKey[key] = DecideNode(draft, nameRule, destinationWorkspaceRoot, classificationSource, forcedAction, forcedReason, explicitDecisions);
         }
 
         // ---- 4b. RelationshipToParent is derived CONSISTENTLY from the
@@ -574,13 +635,44 @@ public static class CopyDesignPlanner
             }
         }
 
+        // Round 6: an UnresolvedOrUnsafe edge (e.g. a reference into a node
+        // whose EXPLICIT decision is EXCLUDE, while some surviving Copy/Reuse
+        // parent still depends on it) means that reference can never be
+        // safely resolved - closes a gap that was UNREACHABLE before EXCLUDE
+        // existed (every prior producer of NeedsDecision already blocked
+        // execution via the node-level check below), so this changes no
+        // behavior for any plan this planner could produce before Round 6.
+        var anyUnresolvedOrUnsafeEdge = false;
+        foreach (var edge in edges.Where(e => e.Disposition == CopyDesignEdgeDisposition.UnresolvedOrUnsafe))
+        {
+            anyUnresolvedOrUnsafeEdge = true;
+            warnings.Add($"The reference from \"{Path.GetFileName(edge.ParentAbsolutePath)}\" to "
+                + $"\"{Path.GetFileName(edge.ChildAbsolutePath)}\" cannot be safely resolved - the child's decision "
+                + "leaves this reference unresolved/unsafe. No plan containing this edge can be executable.");
+        }
+
         var decidedNodes = order.Select(k => nodesByKey[k]).ToArray();
         var anyNodeBlocksExecution = decidedNodes.Any(n =>
             n.ProposedAction == CopyDesignAction.NeedsDecision
             || (n.ProposedAction == CopyDesignAction.Copy && n.ProposedDestinationAbsolutePath is null));
 
+        // Round 8: acknowledgeModelFilesOnly waives ONLY the drawing-
+        // association-completeness blocker - it is folded in here, and
+        // ONLY here. Every other term in this expression is completely
+        // untouched by the flag, so NeedsDecision, collisions, unsafe
+        // edges, invalid drawing evidence, and an incomplete scan all still
+        // fail the plan closed exactly as before.
+        var drawingCompletenessSatisfied = drawingAssociationComplete || acknowledgeModelFilesOnly;
+        if (acknowledgeModelFilesOnly)
+        {
+            warnings.Add("MODE: MODEL FILES ONLY - the engineer explicitly acknowledged that drawing associations "
+                + "cannot be proven for one or more models and chose to continue without them. "
+                + "DRAWINGS: NOT INCLUDED - no IDW/DWG file will be copied or reference-rewired by this operation.");
+        }
+
         var isExecutable = scanWasComplete && !anyNodeBlocksExecution && !anyDuplicateDestination
-            && !anyLocalCollision && !anyInvalidAssociationEvidence && drawingAssociationComplete;
+            && !anyLocalCollision && !anyInvalidAssociationEvidence && drawingCompletenessSatisfied
+            && !anyUnresolvedOrUnsafeEdge;
 
         // ---- 7. sort the FINAL returned collections with a complete,
         //         ordinal, total order - never the raw discovery/observation
@@ -601,7 +693,8 @@ public static class CopyDesignPlanner
             finalWarnings,
             isExecutable,
             scanWasComplete,
-            drawingAssociationAvailable);
+            drawingAssociationAvailable,
+            acknowledgeModelFilesOnly);
     }
 
     /// <summary>A complete, total, ordinal sort key for a plan node - prefers
@@ -697,7 +790,8 @@ public static class CopyDesignPlanner
         string destinationWorkspaceRoot,
         IComponentClassificationSource classificationSource,
         CopyDesignAction? forcedAction,
-        string? forcedReason = null)
+        string? forcedReason = null,
+        IReadOnlyDictionary<string, CopyDesignAction>? explicitDecisions = null)
     {
         var reasons = new List<string>();
         CopyDesignAction action;
@@ -774,15 +868,30 @@ public static class CopyDesignPlanner
                 default:
                     // ARCHITECTURE CORRECTION: no authoritative classification
                     // signal is available - do NOT guess COPY. Surface
-                    // NeedsDecision and let the plan fail closed. The
-                    // suggestion below is NON-AUTHORITATIVE - it is plain text
-                    // in Reasons, never assigned to ProposedAction, and can
-                    // never become the effective action without an explicit
-                    // engineer decision (there is no auto-apply path for it).
-                    action = CopyDesignAction.NeedsDecision;
-                    reasons.Add("No library/shared classification signal is available for this managed component - "
-                        + "refusing to guess. Suggested: COPY (not automatically applied - requires an explicit "
-                        + "engineer decision).");
+                    // NeedsDecision and let the plan fail closed, UNLESS the
+                    // caller supplied an explicit engineer decision for this
+                    // EXACT stable cadDocumentId (Round 6) - the ONLY
+                    // supported way to resolve this specific case; see
+                    // CopyDesignExplicitDecisionEligibility's doc comment.
+                    // The "Suggested: COPY" text remains NON-AUTHORITATIVE -
+                    // it is plain text in Reasons, never assigned to
+                    // ProposedAction, and can never become the effective
+                    // action without landing in explicitDecisions first.
+                    if (explicitDecisions is not null
+                        && explicitDecisions.TryGetValue(draft.CadDocumentId!, out var explicitAction)
+                        && explicitAction is CopyDesignAction.Copy or CopyDesignAction.Reuse or CopyDesignAction.Exclude)
+                    {
+                        action = explicitAction;
+                        reasons.Add($"Explicit engineer decision: {explicitAction} (no library/shared classification "
+                            + "signal was available; suggested action was COPY).");
+                    }
+                    else
+                    {
+                        action = CopyDesignAction.NeedsDecision;
+                        reasons.Add(CopyDesignExplicitDecisionEligibility.ClassificationUnknownReasonPrefix
+                            + " - refusing to guess. Suggested: COPY (not automatically applied - requires an explicit "
+                            + "engineer decision).");
+                    }
                     break;
             }
         }

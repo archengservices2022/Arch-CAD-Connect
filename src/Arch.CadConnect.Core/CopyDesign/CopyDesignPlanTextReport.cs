@@ -25,6 +25,14 @@ public static class CopyDesignPlanTextReport
         sb.AppendLine("Root: " + plan.RootAbsolutePath);
         sb.AppendLine("Scan: " + (plan.ScanWasComplete ? "COMPLETE" : "PARTIAL"));
         sb.AppendLine("Drawing association data: " + (plan.DrawingAssociationAvailable ? "AVAILABLE" : "NOT AVAILABLE"));
+        if (plan.ModelFilesOnlyAcknowledged)
+        {
+            // Round 8: always shown, at the top of the report, whenever the
+            // engineer explicitly acknowledged this mode - never buried only
+            // in the warnings list.
+            sb.AppendLine("MODE: MODEL FILES ONLY");
+            sb.AppendLine("DRAWINGS: NOT INCLUDED");
+        }
         sb.AppendLine("Plan status: " + (plan.IsExecutable ? "READY (all nodes resolved safely)" : "NOT EXECUTABLE"));
         sb.AppendLine();
 

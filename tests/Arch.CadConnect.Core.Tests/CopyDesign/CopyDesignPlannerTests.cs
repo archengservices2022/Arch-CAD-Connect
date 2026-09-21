@@ -18,7 +18,9 @@ public class CopyDesignPlannerTests
         string? destRoot = null,
         IComponentClassificationSource? classification = null,
         IDrawingAssociationSource? drawings = null,
-        Func<string, bool>? destinationExists = null) =>
+        Func<string, bool>? destinationExists = null,
+        IReadOnlyDictionary<string, CopyDesignAction>? explicitDecisions = null,
+        bool acknowledgeModelFilesOnly = false) =>
         CopyDesignPlanner.Plan(scan, rule ?? TokenRule, destRoot ?? DestRoot, classification,
             // ROUND 7: the DEFAULT drawing source for this test file is
             // "complete but empty" (Found, zero drawings, for ANY query) -
@@ -31,7 +33,8 @@ public class CopyDesignPlannerTests
             // that root query going unanswered. Tests that specifically
             // exercise "no source"/"incomplete authority" pass their own
             // explicit `drawings:` value instead.
-            drawings ?? AlwaysFoundEmptyDrawingSource.Instance, destinationExists);
+            drawings ?? AlwaysFoundEmptyDrawingSource.Instance, destinationExists, explicitDecisions,
+            acknowledgeModelFilesOnly);
 
     /// <summary>A "complete but empty" drawing authority - reports
     ///  <see cref="DrawingAssociationOutcome.Found"/> with zero drawings for
@@ -1246,6 +1249,7 @@ public class CopyDesignPlannerTests
         Assert.Equal(expected.IsExecutable, actual.IsExecutable);
         Assert.Equal(expected.ScanWasComplete, actual.ScanWasComplete);
         Assert.Equal(expected.DrawingAssociationAvailable, actual.DrawingAssociationAvailable);
+        Assert.Equal(expected.ModelFilesOnlyAcknowledged, actual.ModelFilesOnlyAcknowledged);
         Assert.Equal(
             expected.Warnings.OrderBy(w => w, StringComparer.Ordinal),
             actual.Warnings.OrderBy(w => w, StringComparer.Ordinal));
@@ -1865,6 +1869,7 @@ public class CopyDesignPlannerTests
         Assert.Equal(expected.IsExecutable, actual.IsExecutable);
         Assert.Equal(expected.ScanWasComplete, actual.ScanWasComplete);
         Assert.Equal(expected.DrawingAssociationAvailable, actual.DrawingAssociationAvailable);
+        Assert.Equal(expected.ModelFilesOnlyAcknowledged, actual.ModelFilesOnlyAcknowledged);
         Assert.Equal(expected.Warnings, actual.Warnings); // EXACT sequence - no re-sorting
 
         Assert.Equal(expected.Nodes.Count, actual.Nodes.Count);
@@ -2940,5 +2945,612 @@ public class CopyDesignPlannerTests
         Assert.Equal(CadDocumentType.Ipt, part.DocumentType); // never reclassified by its file name
         Assert.False(plan.IsExecutable);
         Assert.Contains(plan.Warnings, w => w.Contains("Drawing association authority was unavailable", StringComparison.Ordinal));
+    }
+
+    // ======================================================================
+    // Round 6 (P6C manual acceptance follow-up): explicit COPY/REUSE/EXCLUDE
+    // decisions for a NeedsDecision node whose ONLY blocker is an unavailable
+    // library/shared classification signal - see CopyDesignExplicitDecisions.cs
+    // for the shared eligibility/validation vocabulary, and
+    // CopyDesignExplicitDecisionsTests.cs for its own dedicated tests.
+    // ======================================================================
+
+    // ---- Round 6, item 1: unresolved NeedsDecision => NOT EXECUTABLE ----
+
+    [Fact]
+    public void Round6_An_unresolved_classification_NeedsDecision_node_leaves_the_plan_NOT_executable()
+    {
+        var partPath = P("Design", "10073-P001.ipt");
+        var scan = Scan(Root(RootPath), new[] { Managed(RootPath, partPath, "cad_p1", "fv_p1") });
+
+        var plan = Plan(scan); // no classification source, no explicit decisions
+
+        var part = Assert.Single(plan.Nodes, n => n.CadDocumentId == "cad_p1");
+        Assert.Equal(CopyDesignAction.NeedsDecision, part.ProposedAction);
+        Assert.True(CopyDesignExplicitDecisionEligibility.IsEligibleForExplicitDecision(part));
+        Assert.False(plan.IsExecutable);
+    }
+
+    // ---- Round 6, items 2, 9, 10, 11, 12: explicit COPY resolves
+    //      NeedsDecision, and P4C -> P6C is deterministic for the real
+    //      acceptance fixture's ROOT/PART-A/PART-B ----------------------
+
+    [Fact]
+    public void Round6_Explicit_COPY_decisions_resolve_all_ACCEPT_nodes_to_the_deterministic_P6C_destinations()
+    {
+        var rootPath = P("Design", "P4C-REAL-ROOT.iam");
+        var partAPath = P("Design", "P4C-REAL-PART-A.ipt");
+        var partBPath = P("Design", "P4C-REAL-PART-B.ipt");
+        var scan = Scan(Root(rootPath), new[]
+        {
+            Managed(rootPath, partAPath, "cad_a", "fv_a1"),
+            Managed(rootPath, partBPath, "cad_b", "fv_b1"),
+        });
+        var tokenRule = new TokenReplaceNameRule("P4C", "P6C");
+        var explicitDecisions = new Dictionary<string, CopyDesignAction>
+        {
+            ["cad_a"] = CopyDesignAction.Copy,
+            ["cad_b"] = CopyDesignAction.Copy,
+        };
+
+        var plan = Plan(scan, rule: tokenRule, explicitDecisions: explicitDecisions);
+
+        var root = Assert.Single(plan.Nodes, n => n.IsRoot);
+        var a = Assert.Single(plan.Nodes, n => n.CadDocumentId == "cad_a");
+        var b = Assert.Single(plan.Nodes, n => n.CadDocumentId == "cad_b");
+        Assert.Equal(CopyDesignAction.Copy, root.ProposedAction); // the root is always auto-COPY, never a decision
+        Assert.Equal("P6C-REAL-ROOT.iam", root.ProposedDestinationFileName);
+        Assert.Equal(CopyDesignAction.Copy, a.ProposedAction);
+        Assert.Equal("P6C-REAL-PART-A.ipt", a.ProposedDestinationFileName);
+        Assert.Contains(a.Reasons, r => r.Contains("Explicit engineer decision: Copy", StringComparison.Ordinal));
+        Assert.Equal(CopyDesignAction.Copy, b.ProposedAction);
+        Assert.Equal("P6C-REAL-PART-B.ipt", b.ProposedDestinationFileName);
+        Assert.True(plan.IsExecutable);
+    }
+
+    // ---- Round 6, item 3: explicit REUSE resolves per existing safe
+    //      semantics (identity preserved, no destination, no new CadDocument) -
+
+    [Fact]
+    public void Round6_Explicit_REUSE_decision_resolves_NeedsDecision_and_retains_the_existing_stable_identity_with_no_destination()
+    {
+        var partPath = P("Design", "10073-P001.ipt");
+        var scan = Scan(Root(RootPath), new[] { Managed(RootPath, partPath, "cad_p1", "fv_p1") });
+
+        var plan = Plan(scan, explicitDecisions: new Dictionary<string, CopyDesignAction> { ["cad_p1"] = CopyDesignAction.Reuse });
+
+        var part = Assert.Single(plan.Nodes, n => n.CadDocumentId == "cad_p1");
+        Assert.Equal(CopyDesignAction.Reuse, part.ProposedAction);
+        Assert.Equal("cad_p1", part.CadDocumentId); // the SAME stable identity - never a new CadDocument
+        Assert.Equal("fv_p1", part.CurrentFileVersionId);
+        Assert.Null(part.ProposedDestinationFileName);
+        Assert.Null(part.ProposedDestinationAbsolutePath);
+        Assert.True(plan.IsExecutable);
+        var edge = Assert.Single(plan.Edges, e => e.ChildAbsolutePath == partPath);
+        Assert.Equal(CopyDesignEdgeDisposition.RemainsOnReusedSource, edge.Disposition);
+    }
+
+    // ---- Round 6, item 4: explicit EXCLUDE resolves ONLY when safe ------
+
+    [Fact]
+    public void Round6_Explicit_EXCLUDE_resolves_the_NeedsDecision_itself_but_the_plan_stays_NOT_executable_while_a_surviving_parent_still_depends_on_it()
+    {
+        var partPath = P("Design", "10073-P001.ipt");
+        var scan = Scan(Root(RootPath), new[] { Managed(RootPath, partPath, "cad_p1", "fv_p1") });
+
+        var plan = Plan(scan, explicitDecisions: new Dictionary<string, CopyDesignAction> { ["cad_p1"] = CopyDesignAction.Exclude });
+
+        var part = Assert.Single(plan.Nodes, n => n.CadDocumentId == "cad_p1");
+        // The decision itself was consumed - the node is no longer NeedsDecision...
+        Assert.Equal(CopyDesignAction.Exclude, part.ProposedAction);
+        Assert.Contains(part.Reasons, r => r.Contains("Explicit engineer decision: Exclude", StringComparison.Ordinal));
+        // ...but the root's surviving (COPY) reference into it can never be
+        // safely resolved, so reference-safety keeps the WHOLE plan blocked -
+        // EXCLUDE is never "made to work" by weakening this rule.
+        Assert.False(plan.IsExecutable);
+        Assert.Contains(plan.Edges, e => e.ChildAbsolutePath == partPath
+            && e.Disposition == CopyDesignEdgeDisposition.UnresolvedOrUnsafe);
+        Assert.Contains(plan.Warnings, w => w.Contains("cannot be safely resolved", StringComparison.Ordinal));
+    }
+
+    // ---- Round 6, item 5: "Suggested: COPY" is never silently applied ---
+
+    [Fact]
+    public void Round6_Suggested_COPY_text_is_never_silently_applied_even_when_explicit_decisions_exist_for_OTHER_nodes()
+    {
+        var partAPath = P("Design", "10073-A.ipt");
+        var partBPath = P("Design", "10073-B.ipt");
+        var scan = Scan(Root(RootPath), new[]
+        {
+            Managed(RootPath, partAPath, "cad_a", "fv_a1"),
+            Managed(RootPath, partBPath, "cad_b", "fv_b1"),
+        });
+
+        // Only cad_a has an explicit decision - cad_b has none at all.
+        var plan = Plan(scan, explicitDecisions: new Dictionary<string, CopyDesignAction> { ["cad_a"] = CopyDesignAction.Copy });
+
+        var a = Assert.Single(plan.Nodes, n => n.CadDocumentId == "cad_a");
+        var b = Assert.Single(plan.Nodes, n => n.CadDocumentId == "cad_b");
+        Assert.Equal(CopyDesignAction.Copy, a.ProposedAction);
+        Assert.Equal(CopyDesignAction.NeedsDecision, b.ProposedAction); // untouched
+        Assert.Contains(b.Reasons, r => r.Contains("Suggested: COPY", StringComparison.Ordinal));
+        Assert.False(plan.IsExecutable);
+    }
+
+    // ---- Round 6, item 13: a collision among EXPLICITLY decided nodes
+    //      still leaves the plan NOT executable --------------------------
+
+    [Fact]
+    public void Round6_Two_explicitly_COPY_decided_nodes_mapping_to_the_same_destination_still_make_the_plan_NOT_executable()
+    {
+        var partA = P("Design", "A.ipt");
+        var partB = P("Design", "B.ipt");
+        var scan = Scan(Root(RootPath), new[]
+        {
+            Managed(RootPath, partA, "cad_a", "fv_a1"),
+            Managed(RootPath, partB, "cad_b", "fv_b1"),
+        });
+        var decisions = new Dictionary<string, CopyDesignAction>
+        {
+            ["cad_a"] = CopyDesignAction.Copy,
+            ["cad_b"] = CopyDesignAction.Copy,
+        };
+
+        var plan = Plan(scan, rule: new FixedNameRule("SAME.ipt"), explicitDecisions: decisions);
+
+        Assert.False(plan.IsExecutable);
+        Assert.Contains(plan.Warnings, w => w.Contains("Duplicate proposed destination", StringComparison.OrdinalIgnoreCase));
+    }
+
+    // ---- Round 6, item 14: a throwing destinationExists remains the
+    //      pre-existing "best-effort, never a crash" fail-safe behavior ---
+
+    [Fact]
+    public void Round6_A_destinationExists_callback_that_throws_does_not_crash_planning()
+    {
+        var partPath = P("Design", "10073-P001.ipt");
+        var scan = Scan(Root(RootPath), new[] { Managed(RootPath, partPath, "cad_p1", "fv_p1") });
+        var decisions = new Dictionary<string, CopyDesignAction> { ["cad_p1"] = CopyDesignAction.Copy };
+
+        // Regression lock: a throwing destinationExists must never crash
+        // Plan() or abort the whole computation - this pre-existing
+        // "best-effort, never a guarantee" contract (see the planner's own
+        // comment above anyLocalCollision) is unchanged by Round 6. A real
+        // collision is still separately caught, fail-closed, by the offline
+        // reservation/materialize path at Apply time.
+        var plan = Plan(scan, explicitDecisions: decisions, destinationExists: _ => throw new InvalidOperationException("boom"));
+
+        var part = Assert.Single(plan.Nodes, n => n.CadDocumentId == "cad_p1");
+        Assert.Equal(CopyDesignAction.Copy, part.ProposedAction);
+        Assert.True(plan.IsExecutable);
+    }
+
+    // ---- Round 6, item 15: recomputation while editing decisions never
+    //      touches the filesystem - Plan() stays a pure function ----------
+
+    [Fact]
+    public void Round6_Recomputing_a_plan_repeatedly_while_editing_decisions_never_touches_the_filesystem()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("copydesign-round6-");
+        try
+        {
+            var partPath = P("Design", "10073-P001.ipt");
+            var scan = Scan(Root(RootPath), new[] { Managed(RootPath, partPath, "cad_p1", "fv_p1") });
+
+            // Recompute several times, exactly as the real UI workflow does
+            // while the engineer edits decisions, targeting a REAL (empty)
+            // directory as the destination workspace root.
+            _ = CopyDesignPlanner.Plan(scan, TokenRule, tempDir.FullName, null, AlwaysFoundEmptyDrawingSource.Instance, null, null);
+            _ = CopyDesignPlanner.Plan(scan, TokenRule, tempDir.FullName, null, AlwaysFoundEmptyDrawingSource.Instance, null,
+                new Dictionary<string, CopyDesignAction> { ["cad_p1"] = CopyDesignAction.Copy });
+            _ = CopyDesignPlanner.Plan(scan, TokenRule, tempDir.FullName, null, AlwaysFoundEmptyDrawingSource.Instance, null,
+                new Dictionary<string, CopyDesignAction> { ["cad_p1"] = CopyDesignAction.Reuse });
+            _ = CopyDesignPlanner.Plan(scan, TokenRule, tempDir.FullName, null, AlwaysFoundEmptyDrawingSource.Instance, null,
+                new Dictionary<string, CopyDesignAction> { ["cad_p1"] = CopyDesignAction.Exclude });
+
+            Assert.Empty(Directory.EnumerateFileSystemEntries(tempDir.FullName));
+        }
+        finally
+        {
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    // ---- Round 6, item 18: decisions bind to stable cadDocumentId, never
+    //      to display row, order, or path ---------------------------------
+
+    [Fact]
+    public void Round6_Explicit_decisions_bind_to_stable_cadDocumentId_not_to_row_order_or_path()
+    {
+        var partAPath = P("Design", "10073-A.ipt");
+        var partBPath = P("Design", "10073-B.ipt");
+        var decisions = new Dictionary<string, CopyDesignAction>
+        {
+            ["cad_a"] = CopyDesignAction.Copy,
+            ["cad_b"] = CopyDesignAction.Reuse,
+        };
+
+        var scanNormal = Scan(Root(RootPath), new[]
+        {
+            Managed(RootPath, partAPath, "cad_a", "fv_a1"),
+            Managed(RootPath, partBPath, "cad_b", "fv_b1"),
+        });
+        var scanReversed = Scan(Root(RootPath), new[]
+        {
+            Managed(RootPath, partBPath, "cad_b", "fv_b1"),
+            Managed(RootPath, partAPath, "cad_a", "fv_a1"),
+        });
+
+        var planNormal = Plan(scanNormal, explicitDecisions: decisions);
+        var planReversed = Plan(scanReversed, explicitDecisions: decisions);
+
+        AssertPlansAreEquivalent(planNormal, planReversed);
+        Assert.Equal(CopyDesignAction.Copy, Assert.Single(planNormal.Nodes, n => n.CadDocumentId == "cad_a").ProposedAction);
+        Assert.Equal(CopyDesignAction.Reuse, Assert.Single(planNormal.Nodes, n => n.CadDocumentId == "cad_b").ProposedAction);
+    }
+
+    // ---- Round 6, item 19: a decision for one node can never leak onto
+    //      another node, even the only OTHER NeedsDecision node present ---
+
+    [Fact]
+    public void Round6_A_decision_keyed_to_an_UNRELATED_cadDocumentId_never_leaks_onto_the_actual_NeedsDecision_node()
+    {
+        var partPath = P("Design", "10073-P001.ipt");
+        var scan = Scan(Root(RootPath), new[] { Managed(RootPath, partPath, "cad_p1", "fv_p1") });
+
+        // A stale/unrelated id (e.g. left over from a previous scan) must be
+        // ignored - it must NOT fall back to "the only NeedsDecision node".
+        var plan = Plan(scan, explicitDecisions: new Dictionary<string, CopyDesignAction> { ["cad_UNRELATED"] = CopyDesignAction.Copy });
+
+        var part = Assert.Single(plan.Nodes, n => n.CadDocumentId == "cad_p1");
+        Assert.Equal(CopyDesignAction.NeedsDecision, part.ProposedAction);
+        Assert.False(plan.IsExecutable);
+    }
+
+    // ---- Round 6, item 20: repeated recomputation with the same inputs
+    //      is deterministic -------------------------------------------------
+
+    [Fact]
+    public void Round6_Repeated_recomputation_with_the_same_inputs_and_explicit_decisions_is_deterministic()
+    {
+        var partAPath = P("Design", "10073-A.ipt");
+        var partBPath = P("Design", "10073-B.ipt");
+        var scan = Scan(Root(RootPath), new[]
+        {
+            Managed(RootPath, partAPath, "cad_a", "fv_a1"),
+            Managed(RootPath, partBPath, "cad_b", "fv_b1"),
+        });
+        var decisions = new Dictionary<string, CopyDesignAction>
+        {
+            ["cad_a"] = CopyDesignAction.Copy,
+            ["cad_b"] = CopyDesignAction.Exclude,
+        };
+
+        var plan1 = Plan(scan, explicitDecisions: decisions);
+        var plan2 = Plan(scan, explicitDecisions: decisions);
+
+        AssertPlansAreEquivalent(plan1, plan2);
+    }
+
+    // ======================================================================
+    // Round 8 (P6C acceptance follow-up): explicit "model files only"
+    // acknowledgement - the ONLY supported way to waive the drawing-
+    // association-INCOMPLETE blocker for an otherwise-safe IAM/IPT plan. The
+    // DEFAULT (acknowledgeModelFilesOnly omitted/false) remains exactly the
+    // pre-Round-8 safe behavior everywhere else in this file.
+    // ======================================================================
+
+    /// <summary>Returns NotAvailable for ONE specific cadDocumentId (proving
+    ///  GLOBAL incompleteness) and Found-empty for everything else.</summary>
+    private sealed class NotAvailableForOneDrawingSource(string unavailableForCadDocumentId) : IDrawingAssociationSource
+    {
+        public DrawingAssociationResult GetAssociatedDrawings(string cadDocumentId) =>
+            cadDocumentId == unavailableForCadDocumentId
+                ? DrawingAssociationResult.NotAvailable
+                : new DrawingAssociationResult(DrawingAssociationOutcome.Found, Array.Empty<AssociatedDrawing>());
+    }
+
+    // ---- Round 8, item 1: unavailable authority + no acknowledgement =>
+    //      NOT EXECUTABLE (the pre-existing, unchanged default) ------------
+
+    [Fact]
+    public void Round8_Drawing_authority_unavailable_with_NO_acknowledgement_leaves_the_plan_NOT_executable()
+    {
+        var partPath = P("Design", "10073-P001.ipt");
+        var scan = Scan(Root(RootPath), new[] { Managed(RootPath, partPath, "cad_p1", "fv_p1") });
+        var classification = new StubClassification(new Dictionary<string, ComponentClassification>
+        {
+            ["cad_p1"] = ComponentClassification.ProjectSpecific,
+        });
+
+        var plan = Plan(scan, classification: classification, drawings: NoDrawingAssociationSource.Instance);
+
+        Assert.False(plan.IsExecutable);
+        Assert.False(plan.ModelFilesOnlyAcknowledged);
+        Assert.Contains(plan.Warnings, w => w.Contains("Drawing association authority was unavailable", StringComparison.Ordinal));
+    }
+
+    // ---- Round 8, item 2: same plan + explicit acknowledgement => executable
+    //      when that is the ONLY remaining blocker -------------------------
+
+    [Fact]
+    public void Round8_The_SAME_plan_with_explicit_model_only_acknowledgement_becomes_executable()
+    {
+        var partPath = P("Design", "10073-P001.ipt");
+        var scan = Scan(Root(RootPath), new[] { Managed(RootPath, partPath, "cad_p1", "fv_p1") });
+        var classification = new StubClassification(new Dictionary<string, ComponentClassification>
+        {
+            ["cad_p1"] = ComponentClassification.ProjectSpecific,
+        });
+
+        var plan = Plan(scan, classification: classification, drawings: NoDrawingAssociationSource.Instance,
+            acknowledgeModelFilesOnly: true);
+
+        Assert.True(plan.IsExecutable);
+        Assert.True(plan.ModelFilesOnlyAcknowledged);
+    }
+
+    // ---- Round 8, item 3: the drawing-unavailable warning REMAINS visible -
+
+    [Fact]
+    public void Round8_The_drawing_authority_warning_remains_visible_even_once_acknowledged()
+    {
+        var partPath = P("Design", "10073-P001.ipt");
+        var scan = Scan(Root(RootPath), new[] { Managed(RootPath, partPath, "cad_p1", "fv_p1") });
+        var classification = new StubClassification(new Dictionary<string, ComponentClassification>
+        {
+            ["cad_p1"] = ComponentClassification.ProjectSpecific,
+        });
+
+        var plan = Plan(scan, classification: classification, drawings: NoDrawingAssociationSource.Instance,
+            acknowledgeModelFilesOnly: true);
+
+        Assert.True(plan.IsExecutable);
+        Assert.Contains(plan.Warnings, w => w.Contains("Drawing association authority was unavailable", StringComparison.Ordinal));
+    }
+
+    // ---- Round 8, item 4: the final plan explicitly identifies MODEL FILES
+    //      ONLY (both structured flag and warning text) -----------------
+
+    [Fact]
+    public void Round8_The_acknowledged_plan_explicitly_identifies_MODEL_FILES_ONLY_and_DRAWINGS_NOT_INCLUDED()
+    {
+        var partPath = P("Design", "10073-P001.ipt");
+        var scan = Scan(Root(RootPath), new[] { Managed(RootPath, partPath, "cad_p1", "fv_p1") });
+        var classification = new StubClassification(new Dictionary<string, ComponentClassification>
+        {
+            ["cad_p1"] = ComponentClassification.ProjectSpecific,
+        });
+
+        var plan = Plan(scan, classification: classification, drawings: NoDrawingAssociationSource.Instance,
+            acknowledgeModelFilesOnly: true);
+
+        Assert.True(plan.ModelFilesOnlyAcknowledged);
+        Assert.Contains(plan.Warnings, w => w.Contains("MODE: MODEL FILES ONLY", StringComparison.Ordinal));
+        Assert.Contains(plan.Warnings, w => w.Contains("DRAWINGS: NOT INCLUDED", StringComparison.Ordinal));
+    }
+
+    // (Item 5 - the mandatory Apply confirmation repeating this fact - is a
+    // WinForms UI concern with no test harness in this repo; see
+    // CopyDesignApplyConfirmDialog's own "Round 8" comment, and
+    // CopyDesignPreviewZeroMutationSourceTests for this repo's established
+    // source-level-guard pattern for untestable WinForms code.)
+
+    // ---- Round 8, item 6: acknowledgement does NOT resolve NeedsDecision --
+
+    [Fact]
+    public void Round8_Acknowledgement_does_NOT_resolve_a_classification_NeedsDecision_node()
+    {
+        var partPath = P("Design", "10073-P001.ipt");
+        var scan = Scan(Root(RootPath), new[] { Managed(RootPath, partPath, "cad_p1", "fv_p1") });
+
+        // No classification source (Unknown) AND no explicit decision.
+        var plan = Plan(scan, drawings: NoDrawingAssociationSource.Instance, acknowledgeModelFilesOnly: true);
+
+        var part = Assert.Single(plan.Nodes, n => n.CadDocumentId == "cad_p1");
+        Assert.Equal(CopyDesignAction.NeedsDecision, part.ProposedAction);
+        Assert.False(plan.IsExecutable);
+    }
+
+    // ---- Round 8, item 7: acknowledgement does NOT bypass a destination
+    //      collision --------------------------------------------------------
+
+    [Fact]
+    public void Round8_Acknowledgement_does_NOT_bypass_a_duplicate_destination_collision()
+    {
+        var partA = P("Design", "A.ipt");
+        var partB = P("Design", "B.ipt");
+        var scan = Scan(Root(RootPath), new[]
+        {
+            Managed(RootPath, partA, "cad_a", "fv_a1"),
+            Managed(RootPath, partB, "cad_b", "fv_b1"),
+        });
+        var classification = new StubClassification(new Dictionary<string, ComponentClassification>
+        {
+            ["cad_a"] = ComponentClassification.ProjectSpecific,
+            ["cad_b"] = ComponentClassification.ProjectSpecific,
+        });
+
+        var plan = Plan(scan, rule: new FixedNameRule("SAME.ipt"), classification: classification,
+            drawings: NoDrawingAssociationSource.Instance, acknowledgeModelFilesOnly: true);
+
+        Assert.False(plan.IsExecutable);
+        Assert.Contains(plan.Warnings, w => w.Contains("Duplicate proposed destination", StringComparison.OrdinalIgnoreCase));
+    }
+
+    // ---- Round 8, item 8: acknowledgement does NOT bypass an unsafe
+    //      (UnresolvedOrUnsafe) dependency edge ------------------------------
+
+    [Fact]
+    public void Round8_Acknowledgement_does_NOT_bypass_an_unresolved_or_unsafe_dependency_edge()
+    {
+        var partPath = P("Design", "10073-P001.ipt");
+        var scan = Scan(Root(RootPath), new[] { Managed(RootPath, partPath, "cad_p1", "fv_p1") });
+
+        var plan = Plan(scan, drawings: NoDrawingAssociationSource.Instance, acknowledgeModelFilesOnly: true,
+            explicitDecisions: new Dictionary<string, CopyDesignAction> { ["cad_p1"] = CopyDesignAction.Exclude });
+
+        Assert.False(plan.IsExecutable);
+        Assert.Contains(plan.Edges, e => e.ChildAbsolutePath == partPath
+            && e.Disposition == CopyDesignEdgeDisposition.UnresolvedOrUnsafe);
+    }
+
+    // ---- Round 8, item 9: acknowledgement does NOT bypass a missing stable
+    //      identity (unmanaged reference) ------------------------------------
+
+    [Fact]
+    public void Round8_Acknowledgement_does_NOT_bypass_a_missing_stable_identity()
+    {
+        var partPath = P("Design", "10073-P001.ipt");
+        var scan = Scan(Root(RootPath), new[] { Unmanaged(RootPath, partPath) });
+
+        var plan = Plan(scan, drawings: NoDrawingAssociationSource.Instance, acknowledgeModelFilesOnly: true);
+
+        var part = Assert.Single(plan.Nodes, n => !n.IsRoot);
+        Assert.Null(part.CadDocumentId);
+        Assert.Equal(CopyDesignAction.NeedsDecision, part.ProposedAction);
+        Assert.False(plan.IsExecutable);
+    }
+
+    // ---- Round 8, item 10: a discovered drawing node is never silently
+    //      dropped by model-only mode ----------------------------------------
+
+    [Fact]
+    public void Round8_A_scanner_discovered_drawing_node_is_never_dropped_when_model_only_mode_makes_the_plan_executable()
+    {
+        var rootIdentity = new PlmIdentity("cad_root", null, "fv_root1");
+        var modelAPath = P("Design", "A.ipt");
+        var modelBPath = P("Design", "B.ipt");
+        var scan = Scan(Root(RootPath, type: CadDocumentType.Idw), new[]
+        {
+            Managed(RootPath, modelAPath, "cad_a", "fv_a1", kind: CadRelationshipKind.DrawingModel, parentIdentity: rootIdentity),
+            Managed(RootPath, modelBPath, "cad_b", "fv_b1", kind: CadRelationshipKind.DrawingModel, parentIdentity: rootIdentity),
+        });
+        var classification = new StubClassification(new Dictionary<string, ComponentClassification>
+        {
+            ["cad_a"] = ComponentClassification.ProjectSpecific,
+            ["cad_b"] = ComponentClassification.ProjectSpecific,
+        });
+        var drawingSource = new NotAvailableForOneDrawingSource("cad_a");
+
+        var planBlocked = Plan(scan, classification: classification, drawings: drawingSource);
+        Assert.False(planBlocked.IsExecutable);
+        var rootBlocked = Assert.Single(planBlocked.Nodes, n => n.IsRoot);
+        Assert.Equal(CadDocumentType.Idw, rootBlocked.DocumentType);
+        Assert.Equal(CopyDesignAction.Copy, rootBlocked.ProposedAction); // decided already, not dropped, even while blocked
+
+        var plan = Plan(scan, classification: classification, drawings: drawingSource, acknowledgeModelFilesOnly: true);
+        Assert.True(plan.IsExecutable);
+        var root = Assert.Single(plan.Nodes, n => n.IsRoot);
+        Assert.Equal(CadDocumentType.Idw, root.DocumentType); // still present - never silently dropped/excluded
+        Assert.Equal(CopyDesignAction.Copy, root.ProposedAction);
+    }
+
+    // ---- Round 8, item 11: preview/recomputation remains zero mutation ----
+
+    [Fact]
+    public void Round8_Recomputing_with_model_only_acknowledgement_never_touches_the_filesystem()
+    {
+        var tempDir = Directory.CreateTempSubdirectory("copydesign-round8-");
+        try
+        {
+            var partPath = P("Design", "10073-P001.ipt");
+            var scan = Scan(Root(RootPath), new[] { Managed(RootPath, partPath, "cad_p1", "fv_p1") });
+            var classification = new StubClassification(new Dictionary<string, ComponentClassification>
+            {
+                ["cad_p1"] = ComponentClassification.ProjectSpecific,
+            });
+
+            _ = CopyDesignPlanner.Plan(scan, TokenRule, tempDir.FullName, classification, NoDrawingAssociationSource.Instance);
+            _ = CopyDesignPlanner.Plan(scan, TokenRule, tempDir.FullName, classification, NoDrawingAssociationSource.Instance,
+                acknowledgeModelFilesOnly: true);
+
+            Assert.Empty(Directory.EnumerateFileSystemEntries(tempDir.FullName));
+        }
+        finally
+        {
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    // ---- Round 8, item 12: repeated recomputation with the same inputs is
+    //      deterministic -----------------------------------------------------
+
+    [Fact]
+    public void Round8_Repeated_recomputation_with_the_same_model_only_acknowledgement_is_deterministic()
+    {
+        var partPath = P("Design", "10073-P001.ipt");
+        var scan = Scan(Root(RootPath), new[] { Managed(RootPath, partPath, "cad_p1", "fv_p1") });
+        var classification = new StubClassification(new Dictionary<string, ComponentClassification>
+        {
+            ["cad_p1"] = ComponentClassification.ProjectSpecific,
+        });
+
+        var plan1 = Plan(scan, classification: classification, drawings: NoDrawingAssociationSource.Instance,
+            acknowledgeModelFilesOnly: true);
+        var plan2 = Plan(scan, classification: classification, drawings: NoDrawingAssociationSource.Instance,
+            acknowledgeModelFilesOnly: true);
+
+        AssertPlansAreEquivalent(plan1, plan2);
+    }
+
+    // ---- Round 8, item 13: existing P6A safety behavior remains DEFAULT ---
+
+    [Fact]
+    public void Round8_Omitting_the_acknowledgement_parameter_entirely_preserves_the_pre_Round8_default_behavior()
+    {
+        var partPath = P("Design", "10073-P001.ipt");
+        var scan = Scan(Root(RootPath), new[] { Managed(RootPath, partPath, "cad_p1", "fv_p1") });
+        var classification = new StubClassification(new Dictionary<string, ComponentClassification>
+        {
+            ["cad_p1"] = ComponentClassification.ProjectSpecific,
+        });
+
+        // acknowledgeModelFilesOnly is not passed at all.
+        var plan = CopyDesignPlanner.Plan(scan, TokenRule, DestRoot, classification, NoDrawingAssociationSource.Instance);
+
+        Assert.False(plan.IsExecutable);
+        Assert.False(plan.ModelFilesOnlyAcknowledged);
+    }
+
+    // ---- Round 8, item 14: the full ACCEPT fixture (ROOT/PART-A/PART-B)
+    //      becomes executable under explicit model-only mode -----------------
+
+    [Fact]
+    public void Round8_The_full_ACCEPT_fixture_ROOT_A_B_becomes_executable_under_explicit_model_only_mode()
+    {
+        var rootPath = P("Design", "P4C-REAL-ROOT.iam");
+        var partAPath = P("Design", "P4C-REAL-PART-A.ipt");
+        var partBPath = P("Design", "P4C-REAL-PART-B.ipt");
+        var scan = Scan(Root(rootPath), new[]
+        {
+            Managed(rootPath, partAPath, "cad_a", "fv_a1"),
+            Managed(rootPath, partBPath, "cad_b", "fv_b1"),
+        });
+        var tokenRule = new TokenReplaceNameRule("P4C", "P6C");
+        var explicitDecisions = new Dictionary<string, CopyDesignAction>
+        {
+            ["cad_a"] = CopyDesignAction.Copy,
+            ["cad_b"] = CopyDesignAction.Copy,
+        };
+
+        // No drawing association authority at all - exactly the real
+        // acceptance observation ("plan remains NOT EXECUTABLE solely
+        // because drawing association authority is unavailable").
+        var plan = Plan(scan, rule: tokenRule, explicitDecisions: explicitDecisions,
+            drawings: NoDrawingAssociationSource.Instance, acknowledgeModelFilesOnly: true);
+
+        var root = Assert.Single(plan.Nodes, n => n.IsRoot);
+        var a = Assert.Single(plan.Nodes, n => n.CadDocumentId == "cad_a");
+        var b = Assert.Single(plan.Nodes, n => n.CadDocumentId == "cad_b");
+        Assert.Equal(CopyDesignAction.Copy, root.ProposedAction);
+        Assert.Equal("P6C-REAL-ROOT.iam", root.ProposedDestinationFileName);
+        Assert.Equal(CopyDesignAction.Copy, a.ProposedAction);
+        Assert.Equal("P6C-REAL-PART-A.ipt", a.ProposedDestinationFileName);
+        Assert.Equal(CopyDesignAction.Copy, b.ProposedAction);
+        Assert.Equal("P6C-REAL-PART-B.ipt", b.ProposedDestinationFileName);
+        Assert.True(plan.IsExecutable);
+        Assert.True(plan.ModelFilesOnlyAcknowledged);
+        Assert.Contains(plan.Warnings, w => w.Contains("MODE: MODEL FILES ONLY", StringComparison.Ordinal));
     }
 }

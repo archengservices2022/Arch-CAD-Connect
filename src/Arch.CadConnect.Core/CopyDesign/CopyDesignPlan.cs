@@ -105,7 +105,17 @@ public sealed record CopyDesignPlan(
     ///  available (P6A's shipped default) - the ABSENCE of drawing nodes in
     ///  <see cref="Nodes"/> must never be read as "this design has no
     ///  drawings"; it means the association could not be proven yet.</summary>
-    bool DrawingAssociationAvailable)
+    bool DrawingAssociationAvailable,
+    /// <summary>Round 8: true ONLY when the caller explicitly passed
+    ///  <c>acknowledgeModelFilesOnly: true</c> to <see cref="CopyDesignPlanner.Plan"/>
+    ///  for THIS plan - an affirmative, non-default, non-persisted engineer
+    ///  choice that this Copy Design operation covers IAM/IPT model files
+    ///  only and that any unproven drawing association will NOT be copied.
+    ///  When true, the plan's own <see cref="Warnings"/> also carries an
+    ///  explicit "MODE: MODEL FILES ONLY / DRAWINGS: NOT INCLUDED" entry -
+    ///  this flag exists so UI surfaces (preview, Apply confirmation) can
+    ///  detect and restate the mode without re-parsing warning text.</summary>
+    bool ModelFilesOnlyAcknowledged)
 {
     public static CopyDesignPlan Empty(string rootAbsolutePath, string reason) => new(
         rootAbsolutePath,
@@ -114,5 +124,6 @@ public sealed record CopyDesignPlan(
         new[] { reason },
         IsExecutable: false,
         ScanWasComplete: false,
-        DrawingAssociationAvailable: false);
+        DrawingAssociationAvailable: false,
+        ModelFilesOnlyAcknowledged: false);
 }

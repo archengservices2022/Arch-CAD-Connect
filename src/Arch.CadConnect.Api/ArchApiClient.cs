@@ -192,6 +192,26 @@ public sealed class ArchApiClient : IArchApi
         return Orchestrator(session).UndoAsync(file.WorkspaceRoot, file.AbsoluteFilePath, reason, ct);
     }
 
+    // ---- Copy Design apply / materialization (P6C) ---------------------
+
+    public Task<Core.CopyDesign.Apply.CopyDesignReservationResponse> ApplyCopyDesignAsync(
+        IArchSession session, Core.CopyDesign.Apply.CopyDesignApplyRequest request, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(request);
+        var client = new CopyDesign.CopyDesignApplyHttpClient(Server, session, _http, _options.Timeout);
+        return client.ApplyAsync(request, ct);
+    }
+
+    public Task<Core.CopyDesign.Apply.CopyDesignMaterializationResult> MaterializeFirstFileVersionAsync(
+        IArchSession session, Core.CopyDesign.Apply.CopyDesignMaterializeRequest request, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(request);
+        var client = new CopyDesign.CopyDesignMaterializeHttpClient(Server, session, _http, _options.Timeout);
+        return client.MaterializeFirstFileVersionAsync(request, ct);
+    }
+
     public Task<ServerCheckoutStatus> GetCheckoutStatusAsync(
         IArchSession session, string cadDocumentId, CancellationToken ct = default)
     {
