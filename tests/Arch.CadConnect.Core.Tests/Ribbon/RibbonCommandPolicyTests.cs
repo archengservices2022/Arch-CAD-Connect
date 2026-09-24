@@ -238,4 +238,130 @@ public class RibbonCommandPolicyTests
             Assert.Equal(RibbonCommandPolicy.IsEnabled(command, ConnectionState.Connected, doc, "ENGINEER"), map[command]);
         }
     }
+
+    // ---- P6D LIVE ACCEPTANCE FIX: Resume / Recover Copy Design ----------
+    //
+    // ROOT CAUSE this covers: before this fix, IsEnabled's switch had NO
+    // case at all for CopyDesignResume/CopyDesignRecover - they fell
+    // through to `_ => false` unconditionally, so the buttons were disabled
+    // EVERY time, regardless of whether a genuinely resumable/uncertain
+    // attempt existed. Never gated on an active/scannable document (a
+    // remembered/durable attempt already carries its own plan - see
+    // ArchCommand.RequiresActiveDocument's own comment).
+    //
+    // P6D PRODUCTION RECOVERY: CopyDesignResume is now enabled whenever
+    // CONNECTED, with or without an in-memory hasResumableCopyDesignAttempt -
+    // a DURABLE resume (by known operation id, reconstructed from server
+    // authority) is always offered; the controller decides in-session vs.
+    // durable-by-id once invoked. CopyDesignRecover is UNCHANGED - it still
+    // requires hasUncertainCopyDesignAttempt (no durable-by-id equivalent
+    // exists for an uncertain/unconfirmed reservation).
+
+    [Fact]
+    public void CopyDesignResume_is_enabled_when_connected_even_with_NO_resumable_attempt_offers_durable_resume()
+    {
+        Assert.True(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.CopyDesignResume, ConnectionState.Connected, NoDoc, "ENGINEER",
+            hasResumableCopyDesignAttempt: false));
+    }
+
+    [Fact]
+    public void CopyDesignResume_is_enabled_once_a_resumable_attempt_is_remembered_no_active_document_needed()
+    {
+        Assert.True(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.CopyDesignResume, ConnectionState.Connected, NoDoc, "ENGINEER",
+            hasResumableCopyDesignAttempt: true));
+        // still true with a document open, and regardless of role - Resume
+        // reuses an already-reserved P6B operation, it is not gated on
+        // write-role the way a checkout/repair is.
+        Assert.True(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.CopyDesignResume, ConnectionState.Connected, ScannableDoc(), "VIEWER",
+            hasResumableCopyDesignAttempt: true));
+    }
+
+    [Theory]
+    [InlineData(ConnectionState.SignedOut)]
+    [InlineData(ConnectionState.Connecting)]
+    [InlineData(ConnectionState.Unauthorized)]
+    [InlineData(ConnectionState.ServerUnavailable)]
+    public void CopyDesignResume_needs_a_live_connection_regardless_of_resumable_attempt_state(ConnectionState state)
+    {
+        Assert.False(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.CopyDesignResume, state, NoDoc, "ENGINEER", hasResumableCopyDesignAttempt: true));
+        Assert.False(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.CopyDesignResume, state, NoDoc, "ENGINEER", hasResumableCopyDesignAttempt: false));
+    }
+
+    [Fact]
+    public void CopyDesignResume_is_enabled_by_an_UNCERTAIN_attempt_too_it_is_connection_gated_only()
+    {
+        Assert.True(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.CopyDesignResume, ConnectionState.Connected, NoDoc, "ENGINEER",
+            hasResumableCopyDesignAttempt: false, hasUncertainCopyDesignAttempt: true));
+    }
+
+    [Fact]
+    public void CopyDesignRecover_is_disabled_with_no_uncertain_attempt_even_when_connected()
+    {
+        Assert.False(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.CopyDesignRecover, ConnectionState.Connected, NoDoc, "ENGINEER",
+            hasUncertainCopyDesignAttempt: false));
+    }
+
+    [Fact]
+    public void CopyDesignRecover_is_enabled_once_an_uncertain_attempt_is_remembered_no_active_document_needed()
+    {
+        Assert.True(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.CopyDesignRecover, ConnectionState.Connected, NoDoc, "ENGINEER",
+            hasUncertainCopyDesignAttempt: true));
+    }
+
+    [Theory]
+    [InlineData(ConnectionState.SignedOut)]
+    [InlineData(ConnectionState.Connecting)]
+    [InlineData(ConnectionState.Unauthorized)]
+    [InlineData(ConnectionState.ServerUnavailable)]
+    public void CopyDesignRecover_needs_a_live_connection_even_with_an_uncertain_attempt(ConnectionState state)
+    {
+        Assert.False(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.CopyDesignRecover, state, NoDoc, "ENGINEER", hasUncertainCopyDesignAttempt: true));
+    }
+
+    [Fact]
+    public void CopyDesignRecover_is_never_enabled_by_a_RESUMABLE_attempt_alone()
+    {
+        Assert.False(RibbonCommandPolicy.IsEnabled(
+            ArchCommand.CopyDesignRecover, ConnectionState.Connected, NoDoc, "ENGINEER",
+            hasResumableCopyDesignAttempt: true, hasUncertainCopyDesignAttempt: false));
+    }
+
+    [Fact]
+    public void Recover_reflects_ONLY_its_own_uncertain_attempt_state_never_the_resumable_one()
+    {
+        var resumableMap = RibbonCommandPolicy.Evaluate(
+            ConnectionState.Connected, NoDoc, "ENGINEER",
+            hasResumableCopyDesignAttempt: true, hasUncertainCopyDesignAttempt: false);
+        Assert.True(resumableMap[ArchCommand.CopyDesignResume]); // connected -> always true
+        Assert.False(resumableMap[ArchCommand.CopyDesignRecover]);
+
+        var uncertainMap = RibbonCommandPolicy.Evaluate(
+            ConnectionState.Connected, NoDoc, "ENGINEER",
+            hasResumableCopyDesignAttempt: false, hasUncertainCopyDesignAttempt: true);
+        Assert.True(uncertainMap[ArchCommand.CopyDesignResume]); // connected -> always true
+        Assert.True(uncertainMap[ArchCommand.CopyDesignRecover]);
+    }
+
+    [Fact]
+    public void Evaluate_defaults_still_enable_Resume_when_connected_but_leave_Recover_disabled()
+    {
+        // Regression guard: a caller (e.g. a stale RefreshEnablement call
+        // site) that forgets to pass the new parameters gets the SAFE
+        // default for each - Resume enabled (it can always offer the
+        // durable-by-id dialog; it never silently acts without one), Recover
+        // disabled (it has no id-based fallback, so omitting its state must
+        // fail closed, never silently enabled).
+        var map = RibbonCommandPolicy.Evaluate(ConnectionState.Connected, NoDoc, "ENGINEER");
+        Assert.True(map[ArchCommand.CopyDesignResume]);
+        Assert.False(map[ArchCommand.CopyDesignRecover]);
+    }
 }

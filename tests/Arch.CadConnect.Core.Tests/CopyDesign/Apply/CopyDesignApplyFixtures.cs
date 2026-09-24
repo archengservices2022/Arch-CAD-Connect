@@ -52,6 +52,13 @@ internal static class CopyDesignApplyFixtures
         parent.SourceAbsolutePath, child.SourceAbsolutePath, CadRelationshipKind.Component,
         childIsCopy ? CopyDesignEdgeDisposition.PointsToNewCopy : CopyDesignEdgeDisposition.RemainsOnReusedSource);
 
+    /// <summary>P6D: a DRAWING -&gt; MODEL edge - <paramref name="drawing"/> is
+    ///  always the PARENT, <paramref name="model"/> always the CHILD (see
+    ///  <see cref="CadRelationshipKind.DrawingModel"/>'s own doc comment).</summary>
+    public static CopyDesignEdge DrawingModelEdge(CopyDesignNode drawing, CopyDesignNode model, bool modelIsCopy) => new(
+        drawing.SourceAbsolutePath, model.SourceAbsolutePath, CadRelationshipKind.DrawingModel,
+        modelIsCopy ? CopyDesignEdgeDisposition.PointsToNewCopy : CopyDesignEdgeDisposition.RemainsOnReusedSource);
+
     public static CopyDesignPlan Plan(
         IReadOnlyList<CopyDesignNode> nodes,
         IReadOnlyList<CopyDesignEdge>? edges = null,

@@ -83,3 +83,30 @@ public sealed class NoDrawingAssociationSource : IDrawingAssociationSource
     public DrawingAssociationResult GetAssociatedDrawings(string cadDocumentId) =>
         DrawingAssociationResult.NotAvailable;
 }
+
+/// <summary>
+/// P6D: the real authority the class doc comment above anticipated, now that
+/// Arch exposes one (the server's <c>DRAWING_REFERENCE</c> reverse-reference
+/// lookup - see <c>Arch.CadConnect.Api.CopyDesign.HttpDrawingAssociationClient</c>).
+/// <see cref="IDrawingAssociationSource.GetAssociatedDrawings"/> is SYNCHRONOUS
+/// (the planner is pure and calls it inline during reconciliation), so the
+/// actual HTTP round trip must happen BEFORE the planner runs - the caller
+/// fetches every candidate model's association result ONCE, up front, and
+/// wraps the result in this class. A model id the caller never asked about
+/// (and therefore never populated) is reported EXACTLY like an explicit
+/// <see cref="DrawingAssociationResult.NotAvailable"/> - never silently
+/// "Found, zero drawings" - so a caller that forgot to prefetch an id fails
+/// closed instead of understating the true (unknown) drawing set.
+/// </summary>
+public sealed class PrefetchedDrawingAssociationSource : IDrawingAssociationSource
+{
+    private readonly IReadOnlyDictionary<string, DrawingAssociationResult> _byModelId;
+
+    public PrefetchedDrawingAssociationSource(IReadOnlyDictionary<string, DrawingAssociationResult> byModelId)
+    {
+        _byModelId = byModelId ?? throw new ArgumentNullException(nameof(byModelId));
+    }
+
+    public DrawingAssociationResult GetAssociatedDrawings(string cadDocumentId) =>
+        _byModelId.TryGetValue(cadDocumentId, out var result) ? result : DrawingAssociationResult.NotAvailable;
+}

@@ -1,5 +1,6 @@
 using Arch.CadConnect.Api.Dtos;
 using Arch.CadConnect.Api.Workspace;
+using Arch.CadConnect.Core.CopyDesign;
 using Arch.CadConnect.Core.References;
 using Arch.CadConnect.Core.Session;
 using Arch.CadConnect.Core.Workspace;
@@ -126,6 +127,32 @@ public interface IArchApi
     Task<LatestVersionLookup> GetLatestVersionsAsync(
         IArchSession session, IReadOnlyCollection<string> cadDocumentIds, CancellationToken ct = default);
 
+    /// <summary>
+    /// P6D DRAWING ASSOCIATION AUTHORITY: fetch, in ONE batched request, the
+    /// AUTHORITATIVE drawing set (server <c>DRAWING_REFERENCE</c> rows) for
+    /// each of <paramref name="modelCadDocumentIds"/> (stable server ids
+    /// only - never a documentNumber or file name). READ-ONLY.
+    ///
+    /// <paramref name="manifest"/>, when supplied, lets each returned
+    /// <see cref="AssociatedDrawing"/> carry the LOCAL absolute path it
+    /// already sits at, when a prior Get Latest already materialized it -
+    /// this never proves the association itself, only enriches it.
+    ///
+    /// Never throws for an unreachable server, a rejected session, an
+    /// unrecognized id, an unsupported endpoint, or a malformed body - every
+    /// such case fails that (or every) id closed to
+    /// <see cref="DrawingAssociationOutcome.NotAvailable"/>, the exact same
+    /// "authority unavailable" state Copy Design Preview already handles for
+    /// the P6A stub - so the caller can wrap the result in a
+    /// <see cref="PrefetchedDrawingAssociationSource"/> and pass it directly
+    /// to <c>CopyDesignPlanner.Plan</c>.
+    /// </summary>
+    Task<IReadOnlyDictionary<string, DrawingAssociationResult>> GetDrawingAssociationsAsync(
+        IArchSession session,
+        IReadOnlyCollection<string> modelCadDocumentIds,
+        WorkspaceManifest? manifest,
+        CancellationToken ct = default);
+
     // ---- Copy Design apply / materialization (P6C) ---------------------
 
     /// <summary>
@@ -146,6 +173,35 @@ public interface IArchApi
     /// </summary>
     Task<Core.CopyDesign.Apply.CopyDesignMaterializationResult> MaterializeFirstFileVersionAsync(
         IArchSession session, Core.CopyDesign.Apply.CopyDesignMaterializeRequest request, CancellationToken ct = default);
+
+    /// <summary>
+    /// P6D ROUND 3, HIGH fix (items D/E): the AUTHORITATIVE, dedicated,
+    /// READ-ONLY status of ONE Copy Design operation - REPLACES round 2's
+    /// reuse of <see cref="GetLatestVersionsAsync"/> for RESUME classification
+    /// (see <see cref="Core.CopyDesign.Apply.ICopyDesignOperationStatusClient"/>'s
+    /// own doc comment for why). P6D ROUND 4 (item D): validated against the
+    /// caller's own confirmed reservation `expectation`. Never throws for a
+    /// transport/auth/contract/validation failure - reported via the
+    /// result's Outcome instead.
+    /// </summary>
+    Task<Core.CopyDesign.Apply.CopyDesignOperationStatusResult> GetCopyDesignOperationStatusAsync(
+        IArchSession session, Core.CopyDesign.Apply.CopyDesignOperationStatusExpectation expectation, CancellationToken ct = default);
+
+    /// <summary>
+    /// P6D PRODUCTION RECOVERY: a RAW, structurally-validated (NOT
+    /// expectation-cross-validated) lookup of ONE Copy Design operation's
+    /// authoritative status, by id alone - used ONLY for DURABLE RESUME
+    /// DISCOVERY (<see cref="Core.CopyDesign.Apply.CopyDesignResumeAttemptReconstructor"/>)
+    /// when this session has no in-memory resumable attempt (e.g. after an
+    /// Inventor restart). Hits the SAME endpoint as
+    /// <see cref="GetCopyDesignOperationStatusAsync"/>; see
+    /// <see cref="Core.CopyDesign.Apply.IDurableCopyDesignOperationStatusClient"/>'s
+    /// own doc comment for why this is a separate, narrower client. Never
+    /// throws for a transport/auth/contract failure - reported via the
+    /// result's Outcome instead.
+    /// </summary>
+    Task<Core.CopyDesign.Apply.CopyDesignDurableResumeStatusResult> GetDurableCopyDesignOperationStatusAsync(
+        IArchSession session, string operationId, CancellationToken ct = default);
 
     // ---- future scope (declared, not implemented) ---------------------
 

@@ -79,6 +79,11 @@ public class CopyDesignPreviewZeroMutationSourceTests
         // never touch the filesystem either.
         yield return new object[] { "src/Arch.CadConnect.Inventor/Ui/CopyDesignDecisionsDialog.cs" };
         yield return new object[] { "src/Arch.CadConnect.Inventor/Ui/CopyDesignModelFilesOnlyDialog.cs" };
+        // P6D: the drawing-association authority prefetch is now part of the
+        // SAME zero-mutation preview flow - a read-only HTTP lookup and a
+        // pure candidate-id derivation, neither ever touching the filesystem.
+        yield return new object[] { "src/Arch.CadConnect.Api/CopyDesign/HttpDrawingAssociationClient.cs" };
+        yield return new object[] { "src/Arch.CadConnect.Core/CopyDesign/CopyDesignDrawingAssociationCandidates.cs" };
     }
 
     [Fact]
@@ -141,11 +146,22 @@ public class CopyDesignPreviewZeroMutationSourceTests
 
         // The controller as a whole legitimately reads other things (e.g.
         // workspace settings) elsewhere, so this asserts specifically within
-        // the Copy Design preview method's body, not the whole file.
+        // the Copy Design preview flow's body, not the whole file.
+        //
+        // P6D: the flow is now split across TWO private methods -
+        // RunCopyDesignPreview() (scan + dialog + the one drawing-association
+        // network prefetch, dispatched via RunBackground so the synchronous
+        // COM scan step is never blocked on it) and ContinueCopyDesignPreview
+        // (everything downstream: planning, the decision/model-files-only
+        // dialogs, the report, and the apply hand-off) - both are captured
+        // here so the zero-mutation guarantee still covers the WHOLE flow,
+        // not just the first half.
         var start = source.IndexOf("private void RunCopyDesignPreview()", StringComparison.Ordinal);
         Assert.True(start >= 0, "RunCopyDesignPreview() method declaration not found - source layout changed.");
-        var end = source.IndexOf("\n    private", start, StringComparison.Ordinal);
-        var body = end > start ? source[start..end] : source[start..];
+        var continueStart = source.IndexOf("private void ContinueCopyDesignPreview(", start, StringComparison.Ordinal);
+        Assert.True(continueStart > start, "ContinueCopyDesignPreview(...) method declaration not found after RunCopyDesignPreview() - source layout changed.");
+        var end = source.IndexOf("\n    private", continueStart, StringComparison.Ordinal);
+        var body = end > continueStart ? source[start..end] : source[start..];
 
         foreach (var forbidden in ForbiddenFilesystemMutationCalls)
         {

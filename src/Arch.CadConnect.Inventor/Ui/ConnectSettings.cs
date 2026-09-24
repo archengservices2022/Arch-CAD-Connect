@@ -24,6 +24,19 @@ public sealed record ConnectSettings
     /// </summary>
     public string? LastWorkspaceRoot { get; init; }
 
+    /// <summary>
+    /// P6D DURABLE RESUME LIVE BLOCKER fix: the destination folder the user
+    /// last entered for a durable Copy Design resume. A convenience default
+    /// only, pre-filled the same way <see cref="LastWorkspaceRoot"/> is - it
+    /// is NOT authority for anything, the user re-confirms it every time, and
+    /// <c>CopyDesignApplyOrchestrator</c> re-verifies the real files there
+    /// regardless. Reduces (never eliminates) the single biggest source of
+    /// a durable resume failing with "already materialized server-side, but
+    /// its expected local destination file is missing": a mistyped folder,
+    /// since this field previously had to be retyped in full every time.
+    /// </summary>
+    public string? LastCopyDesignDestinationFolder { get; init; }
+
     private static string FilePath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "ArchEngineering", "CadConnect", "connect.json");

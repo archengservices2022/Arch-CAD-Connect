@@ -1,14 +1,20 @@
 namespace Arch.CadConnect.Core.CopyDesign.Apply;
 
 /// <summary>
-/// P6C: maps a CONFIRMED, executable P6A <see cref="CopyDesignPlan"/> to a
+/// P6C/P6D: maps a CONFIRMED, executable P6A <see cref="CopyDesignPlan"/> to a
 /// P6B <see cref="CopyDesignApplyRequest"/>. PURE - no COM, no HTTP, no I/O.
 ///
-/// STRICT SCOPE: only <see cref="CadDocumentType.Ipt"/> and
-/// <see cref="CadDocumentType.Iam"/> nodes are ever mapped. A drawing node
-/// (Idw/Dwg) present in the plan - regardless of its proposed action - is
-/// SKIPPED entirely: never sent to P6B, never physically touched. P6D owns
-/// drawings; this is not an error condition, it is P6C's fixed boundary.
+/// SCOPE: <see cref="CadDocumentType.Ipt"/> and <see cref="CadDocumentType.Iam"/>
+/// nodes are ALWAYS mapped (P6C's original, unchanged boundary). A drawing
+/// node (Idw/Dwg) is mapped alongside them - in the SAME reservation request,
+/// using the SAME Copy/Reuse entry shape - whenever <paramref name="includeDrawings"/>
+/// is <c>true</c> (the default: P6D now owns drawing execution, so a normal
+/// Copy Design operation maps everything the confirmed plan represents). The
+/// orchestrator passes <c>includeDrawings: false</c> ONLY when the plan
+/// itself carries an explicit <see cref="CopyDesignPlan.ModelFilesOnlyAcknowledged"/>
+/// acknowledgement - in that one case a drawing node is skipped entirely:
+/// never sent to P6B, never physically touched, exactly mirroring P6C's
+/// original boundary for that specific, explicit, non-default mode.
 ///
 /// FAIL CLOSED (returns a failure, never a partial/best-effort request) when:
 ///   - the plan itself is not executable;
@@ -20,12 +26,15 @@ namespace Arch.CadConnect.Core.CopyDesign.Apply;
 ///   - a REUSE node lacks a stable cadDocumentId;
 ///   - after filtering, there is nothing in-scope to apply at all;
 ///   - two or more COPY entries would request the SAME destination document
-///     number (P6C acceptance follow-up) - a full-PATH collision is already
-///     caught by <see cref="CopyDesignPlanner"/>'s own duplicate-destination
-///     check, but two DIFFERENT destination paths (different extensions, or
-///     different destination sub-folders) can still share the SAME file-name
-///     STEM; this is caught HERE, locally, before any HTTP call is made -
-///     never left to a server-side 409 to be the only line of defense.
+///     number AND the SAME document type (P6C acceptance follow-up; scoped
+///     by type since P6D ROUND 2 - see "DOCUMENT NUMBER" below) - a full-
+///     PATH collision is already caught by <see cref="CopyDesignPlanner"/>'s
+///     own duplicate-destination check, but two DIFFERENT destination paths
+///     (different destination sub-folders, SAME extension) can still share
+///     the SAME file-name STEM; this is caught HERE, locally, before any
+///     HTTP call is made - never left to a server-side 409 to be the only
+///     line of defense. The SAME stem with a DIFFERENT document type (e.g.
+///     "1001.ipt" and "1001.idw") is explicitly NOT a collision.
 ///
 /// DOCUMENT NUMBER: <see cref="CopyDesignNode"/> has no explicit destination
 /// "document number" field (it only proposes a destination FILE NAME) - this
@@ -43,9 +52,11 @@ namespace Arch.CadConnect.Core.CopyDesign.Apply;
 /// </summary>
 public static class CopyDesignApplyRequestMapper
 {
-    private static readonly HashSet<CadDocumentType> InScopeTypes = new() { CadDocumentType.Ipt, CadDocumentType.Iam };
+    private static readonly HashSet<CadDocumentType> ModelTypes = new() { CadDocumentType.Ipt, CadDocumentType.Iam };
+    private static readonly HashSet<CadDocumentType> DrawingTypes = new() { CadDocumentType.Idw, CadDocumentType.Dwg };
 
-    public static CopyDesignApplyMappingResult Map(CopyDesignPlan plan, string idempotencyKey, string? label)
+    public static CopyDesignApplyMappingResult Map(
+        CopyDesignPlan plan, string idempotencyKey, string? label, bool includeDrawings = true)
     {
         ArgumentNullException.ThrowIfNull(plan);
 
@@ -61,10 +72,14 @@ public static class CopyDesignApplyRequestMapper
         var mapped = new List<CopyDesignApplyMappedEntry>();
         foreach (var node in plan.Nodes)
         {
-            if (!InScopeTypes.Contains(node.DocumentType))
+            var inScope = ModelTypes.Contains(node.DocumentType)
+                || (includeDrawings && DrawingTypes.Contains(node.DocumentType));
+            if (!inScope)
             {
-                // Out of P6C's strict scope (drawing, or an unrecognized
-                // type) - never mapped, never blocks IAM/IPT execution.
+                // Out of scope for THIS mapping call - either an unrecognized
+                // type, or a drawing while includeDrawings is false (the
+                // explicit model-files-only acknowledgement) - never mapped,
+                // never blocks the rest of the plan's execution.
                 continue;
             }
 
@@ -146,9 +161,19 @@ public static class CopyDesignApplyRequestMapper
         // full ABSOLUTE PATHS, extension included) would not catch it. Never
         // rely on the server's own uniqueness constraint / a 409 response to
         // catch what this client already knows before sending anything.
+        //
+        // P6D ROUND 2, HIGH fix: the server's uniqueness key is now SCOPED BY
+        // documentType too (CadDocument's @@unique([organizationId,
+        // documentNumber, documentType]) - see the web repo's
+        // 20260921183016_scope_document_number_uniqueness_by_type migration)
+        // - the SAME documentNumber with a DIFFERENT documentType (e.g.
+        // "1001.ipt" and "1001.idw", the normal Inventor model/drawing pair)
+        // is explicitly NOT a collision and must never be rejected here. Only
+        // the SAME (documentNumber, documentType) pair twice is a real
+        // collision.
         var duplicateDocumentNumbers = mapped
             .Where(m => m.Entry.Action == CopyDesignApplyEntryAction.Copy)
-            .GroupBy(m => m.Entry.Copy!.NewDocumentNumber, StringComparer.OrdinalIgnoreCase)
+            .GroupBy(m => (m.Entry.Copy!.NewDocumentNumber, m.Entry.Copy!.DocumentType), DocumentDestinationKeyComparer.Instance)
             .Where(g => g.Count() > 1)
             .ToArray();
         if (duplicateDocumentNumbers.Length > 0)
@@ -156,8 +181,9 @@ public static class CopyDesignApplyRequestMapper
             var group = duplicateDocumentNumbers[0];
             var sources = string.Join(", ", group.Select(m => m.Node.SourceFileName).OrderBy(n => n, StringComparer.Ordinal));
             return CopyDesignApplyMappingResult.Fail(
-                $"Two or more COPY entries would request the same destination document number \"{group.Key}\" "
-                + $"({sources}) - refusing to send a request that could collide. No silent overwrite/collision is permitted.");
+                $"Two or more COPY entries would request the same destination document number \"{group.Key.NewDocumentNumber}\" "
+                + $"for document type {group.Key.DocumentType} ({sources}) - refusing to send a request that could collide. "
+                + "No silent overwrite/collision is permitted.");
         }
 
         return CopyDesignApplyMappingResult.Ok(new CopyDesignApplyRequest(idempotencyKey.Trim(), NormalizeLabel(label), mapped));
@@ -167,6 +193,22 @@ public static class CopyDesignApplyRequestMapper
     {
         var stem = Path.GetFileNameWithoutExtension(fileName)?.Trim();
         return string.IsNullOrWhiteSpace(stem) ? null : stem;
+    }
+
+    /// <summary>P6D ROUND 2: groups a (documentNumber, documentType) pair the
+    ///  SAME way the server's scoped unique constraint does - ordinal,
+    ///  case-INSENSITIVE on the document number (matching every other
+    ///  document-number comparison already in this class), exact on the
+    ///  document type.</summary>
+    private sealed class DocumentDestinationKeyComparer : IEqualityComparer<(string NewDocumentNumber, CadDocumentType DocumentType)>
+    {
+        public static readonly DocumentDestinationKeyComparer Instance = new();
+
+        public bool Equals((string NewDocumentNumber, CadDocumentType DocumentType) x, (string NewDocumentNumber, CadDocumentType DocumentType) y) =>
+            string.Equals(x.NewDocumentNumber, y.NewDocumentNumber, StringComparison.OrdinalIgnoreCase) && x.DocumentType == y.DocumentType;
+
+        public int GetHashCode((string NewDocumentNumber, CadDocumentType DocumentType) obj) =>
+            HashCode.Combine(obj.NewDocumentNumber.ToUpperInvariant(), obj.DocumentType);
     }
 
     private static string? NormalizeLabel(string? label)

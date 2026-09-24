@@ -6,13 +6,22 @@ using Arch.CadConnect.Core.CopyDesign;
 namespace Arch.CadConnect.Inventor.Ui;
 
 /// <summary>
-/// P6C: the MANDATORY explicit confirmation shown between an EXECUTABLE P6A
-/// preview and the actual apply - summarizing exactly what is about to
+/// P6C/P6D: the MANDATORY explicit confirmation shown between an EXECUTABLE
+/// P6A preview and the actual apply - summarizing exactly what is about to
 /// happen so the user makes an informed, explicit choice. Never shown for a
 /// non-executable plan (the caller is responsible for that gate - this
 /// dialog itself has no "apply anyway" escape hatch). Purely a summary/
 /// confirmation surface - it builds nothing, calls nothing, and performs no
 /// I/O of its own.
+///
+/// P6D fix: this dialog previously told the user "drawings are out of scope
+/// and are never modified" UNCONDITIONALLY - that became FALSE the moment
+/// P6D started executing drawings, and showing false information in a
+/// mandatory confirmation immediately before a mutating operation is a real
+/// correctness bug, not a cosmetic one. The summary now counts and reports
+/// drawing (IDW/DWG) Copy/Reuse entries exactly like model entries, and only
+/// claims "no drawing is copied/rewired" when that is actually true (the
+/// explicit model-files-only acknowledgement).
 /// </summary>
 internal sealed class CopyDesignApplyConfirmDialog : Form
 {
@@ -24,8 +33,10 @@ internal sealed class CopyDesignApplyConfirmDialog : Form
     {
         ArgumentNullException.ThrowIfNull(plan);
 
-        var copyCount = plan.Nodes.Count(n => n.ProposedAction == CopyDesignAction.Copy && n.DocumentType is CadDocumentType.Ipt or CadDocumentType.Iam);
-        var reuseCount = plan.Nodes.Count(n => n.ProposedAction == CopyDesignAction.Reuse && n.DocumentType is CadDocumentType.Ipt or CadDocumentType.Iam);
+        var modelCopyCount = plan.Nodes.Count(n => n.ProposedAction == CopyDesignAction.Copy && n.DocumentType is CadDocumentType.Ipt or CadDocumentType.Iam);
+        var modelReuseCount = plan.Nodes.Count(n => n.ProposedAction == CopyDesignAction.Reuse && n.DocumentType is CadDocumentType.Ipt or CadDocumentType.Iam);
+        var drawingCopyCount = plan.Nodes.Count(n => n.ProposedAction == CopyDesignAction.Copy && n.DocumentType is CadDocumentType.Idw or CadDocumentType.Dwg);
+        var drawingReuseCount = plan.Nodes.Count(n => n.ProposedAction == CopyDesignAction.Reuse && n.DocumentType is CadDocumentType.Idw or CadDocumentType.Dwg);
         var destinationRoot = plan.Nodes
             .Where(n => n.ProposedAction == CopyDesignAction.Copy && n.ProposedDestinationAbsolutePath is not null)
             .Select(n => Path.GetDirectoryName(n.ProposedDestinationAbsolutePath))
@@ -42,20 +53,37 @@ internal sealed class CopyDesignApplyConfirmDialog : Form
         AcceptButton = _apply;
         CancelButton = _cancel;
 
-        var modeLine = plan.ModelFilesOnlyAcknowledged
+        // Drawings execute normally UNLESS the plan itself carries the
+        // explicit model-files-only acknowledgement - see
+        // CopyDesignApplyOrchestrator's own class doc comment. That
+        // acknowledgement is the ONLY case where "no drawing is touched" is
+        // actually true, so it is the only case that says so.
+        string modeLine;
+        string drawingLine;
+        if (plan.ModelFilesOnlyAcknowledged)
+        {
             // Round 8: repeat the acknowledged mode here too - the mandatory
             // confirmation must restate it, never assume the preview alone
             // was enough.
-            ? "MODE: MODEL FILES ONLY - DRAWINGS: NOT INCLUDED. Drawing associations could not be proven for one " +
-              "or more models; no IDW/DWG file will be copied or reference-rewired by this operation.\n\n"
-            : string.Empty;
+            modeLine = "MODE: MODEL FILES ONLY - DRAWINGS: NOT INCLUDED. Drawing associations could not be proven for one " +
+                "or more models; no IDW/DWG file will be copied or reference-rewired by this operation.\n\n";
+            drawingLine = string.Empty;
+        }
+        else
+        {
+            modeLine = string.Empty;
+            drawingLine = drawingCopyCount > 0 || drawingReuseCount > 0
+                ? $"This will ALSO physically create {drawingCopyCount} new IDW/DWG drawing file(s) and rewire their " +
+                  $"model reference(s) to the copied/reused targets above, leaving {drawingReuseCount} reused drawing " +
+                  "file(s) untouched.\n\n"
+                : string.Empty;
+        }
 
         _summary.Text =
-            $"This will physically create {copyCount} new IAM/IPT file(s) and leave {reuseCount} reused file(s) untouched.\n\n" +
+            $"This will physically create {modelCopyCount} new IAM/IPT file(s) and leave {modelReuseCount} reused file(s) untouched.\n\n" +
             $"Destination: {destinationRoot}\n\n" +
             modeLine +
-            "This milestone (P6C) does NOT copy, rewire, or otherwise touch any IDW/DWG drawing - " +
-            "drawings are out of scope and are never modified.\n\n" +
+            drawingLine +
             "Source files are never modified. Nothing is staged, committed, or released automatically.";
 
         var buttons = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Dock = DockStyle.Bottom };

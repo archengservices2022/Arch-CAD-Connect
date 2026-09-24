@@ -244,6 +244,106 @@ public sealed class ArchConnectionManager
         => WithSessionAsync((api, s) => api.MaterializeFirstFileVersionAsync(s, request, ct));
 
     /// <summary>
+    /// P6D ROUND 3, HIGH fix (items D/E): fetch the AUTHORITATIVE status of
+    /// ONE Copy Design operation for the current session. READ-ONLY. Never
+    /// throws for transport / auth / contract failures - they are outcomes in
+    /// the returned <see cref="Core.CopyDesign.Apply.CopyDesignOperationStatusResult"/>
+    /// so the orchestrator's RESUME classification fails closed, exactly
+    /// like <see cref="GetLatestVersionsAsync"/>. With no session, resolves
+    /// to <see cref="Core.CopyDesign.Apply.CopyDesignOperationStatusOutcome.AuthenticationFailed"/>.
+    /// </summary>
+    public async Task<Core.CopyDesign.Apply.CopyDesignOperationStatusResult> GetCopyDesignOperationStatusAsync(
+        Core.CopyDesign.Apply.CopyDesignOperationStatusExpectation expectation, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(expectation);
+
+        var session = CurrentSession;
+        if (session is null)
+        {
+            return Core.CopyDesign.Apply.CopyDesignOperationStatusResult.Failure(
+                Core.CopyDesign.Apply.CopyDesignOperationStatusOutcome.AuthenticationFailed);
+        }
+
+        Core.CopyDesign.Apply.CopyDesignOperationStatusResult result;
+        try
+        {
+            result = await _apiFactory(session.Server)
+                .GetCopyDesignOperationStatusAsync(session, expectation, ct)
+                .ConfigureAwait(false);
+        }
+        catch (ArchApiException ex)
+        {
+            // The shipped probe fails closed and never throws; a future / fake
+            // IArchApi might. Honour the same session-failure semantics as
+            // every other authenticated call, but still return a fail-closed
+            // result rather than propagate.
+            if (ex.IsAuthFailure)
+            {
+                InvalidateRejectedSession();
+                return Core.CopyDesign.Apply.CopyDesignOperationStatusResult.Failure(
+                    Core.CopyDesign.Apply.CopyDesignOperationStatusOutcome.AuthenticationFailed);
+            }
+            return Core.CopyDesign.Apply.CopyDesignOperationStatusResult.Failure(
+                Core.CopyDesign.Apply.CopyDesignOperationStatusOutcome.ServerUnavailable);
+        }
+
+        // An AUTHORITATIVE 401 / 403 rejects this desktop session: clear the
+        // stored token and move the connection to Unauthorized, exactly like
+        // GetLatest / Checkout / Check-In / Undo / GetLatestVersionsAsync.
+        if (result.Outcome == Core.CopyDesign.Apply.CopyDesignOperationStatusOutcome.AuthenticationFailed)
+        {
+            InvalidateRejectedSession();
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// P6D PRODUCTION RECOVERY: a RAW, structurally-validated authoritative
+    /// status lookup for ONE Copy Design operation, by id alone - the
+    /// DURABLE RESUME DISCOVERY entry point (see
+    /// <see cref="Core.CopyDesign.Apply.IDurableCopyDesignOperationStatusClient"/>'s
+    /// own doc comment). READ-ONLY. Never throws - a missing session or any
+    /// transport/auth/contract failure resolves to a non-Found outcome.
+    /// </summary>
+    public async Task<Core.CopyDesign.Apply.CopyDesignDurableResumeStatusResult> GetDurableCopyDesignOperationStatusAsync(
+        string operationId, CancellationToken ct = default)
+    {
+        var session = CurrentSession;
+        if (session is null)
+        {
+            return new Core.CopyDesign.Apply.CopyDesignDurableResumeStatusResult(
+                Core.CopyDesign.Apply.CopyDesignDurableResumeStatusOutcome.AuthenticationFailed);
+        }
+
+        Core.CopyDesign.Apply.CopyDesignDurableResumeStatusResult result;
+        try
+        {
+            result = await _apiFactory(session.Server)
+                .GetDurableCopyDesignOperationStatusAsync(session, operationId, ct)
+                .ConfigureAwait(false);
+        }
+        catch (ArchApiException ex)
+        {
+            if (ex.IsAuthFailure)
+            {
+                InvalidateRejectedSession();
+                return new Core.CopyDesign.Apply.CopyDesignDurableResumeStatusResult(
+                    Core.CopyDesign.Apply.CopyDesignDurableResumeStatusOutcome.AuthenticationFailed);
+            }
+            return new Core.CopyDesign.Apply.CopyDesignDurableResumeStatusResult(
+                Core.CopyDesign.Apply.CopyDesignDurableResumeStatusOutcome.ServerUnavailable);
+        }
+
+        if (result.Outcome == Core.CopyDesign.Apply.CopyDesignDurableResumeStatusOutcome.AuthenticationFailed)
+        {
+            InvalidateRejectedSession();
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// P5B-B: fetch the AUTHORITATIVE latest FileVersion identity for each of
     /// <paramref name="cadDocumentIds"/> for the current session. READ-ONLY.
     /// Never throws for transport / auth / unknown-id failures - they are
@@ -293,6 +393,55 @@ public sealed class ArchConnectionManager
         }
 
         return lookup;
+    }
+
+    /// <summary>
+    /// P6D DRAWING ASSOCIATION AUTHORITY: fetch, in ONE batched request, the
+    /// AUTHORITATIVE drawing set for each of <paramref name="modelCadDocumentIds"/>
+    /// for the current session. READ-ONLY. Never throws - a missing session,
+    /// or any transport/auth/contract failure, resolves every requested id to
+    /// <see cref="Core.CopyDesign.DrawingAssociationOutcome.NotAvailable"/>,
+    /// the exact same "authority unavailable" state Copy Design Preview
+    /// already handles for the P6A <c>NoDrawingAssociationSource</c> stub.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, Core.CopyDesign.DrawingAssociationResult>> GetDrawingAssociationsAsync(
+        IReadOnlyCollection<string> modelCadDocumentIds,
+        Core.Workspace.WorkspaceManifest? manifest,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(modelCadDocumentIds);
+
+        var session = CurrentSession;
+        if (session is null)
+        {
+            return AllNotAvailable(modelCadDocumentIds);
+        }
+
+        try
+        {
+            return await _apiFactory(session.Server)
+                .GetDrawingAssociationsAsync(session, modelCadDocumentIds, manifest, ct)
+                .ConfigureAwait(false);
+        }
+        catch (ArchApiException)
+        {
+            // The shipped client fails closed and never throws; a future /
+            // fake IArchApi might. Never propagate - this lookup is
+            // read-only/best-effort and must degrade exactly like an
+            // unavailable authority, never crash Copy Design Preview.
+            return AllNotAvailable(modelCadDocumentIds);
+        }
+    }
+
+    private static Dictionary<string, Core.CopyDesign.DrawingAssociationResult> AllNotAvailable(
+        IEnumerable<string> ids)
+    {
+        var result = new Dictionary<string, Core.CopyDesign.DrawingAssociationResult>(StringComparer.Ordinal);
+        foreach (var id in ids)
+        {
+            result[id] = Core.CopyDesign.DrawingAssociationResult.NotAvailable;
+        }
+        return result;
     }
 
     private async Task<T> WithSessionAsync<T>(Func<IArchApi, IArchSession, Task<T>> op)

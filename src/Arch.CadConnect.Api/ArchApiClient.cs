@@ -224,6 +224,28 @@ public sealed class ArchApiClient : IArchApi
             .GetStatusAsync(cadDocumentId, ct);
     }
 
+    /// <summary>P6D ROUND 3, HIGH fix (items D/E), ROUND 4 (item D): the
+    ///  authoritative per-operation Copy Design status lookup, validated
+    ///  against the caller's OWN confirmed reservation - see
+    ///  <see cref="CopyDesign.HttpCopyDesignOperationStatusProbe"/>'s own doc
+    ///  comment for the full server contract.</summary>
+    public Task<Core.CopyDesign.Apply.CopyDesignOperationStatusResult> GetCopyDesignOperationStatusAsync(
+        IArchSession session, Core.CopyDesign.Apply.CopyDesignOperationStatusExpectation expectation, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(expectation);
+        return new CopyDesign.HttpCopyDesignOperationStatusProbe(Server, _http, _options.Timeout)
+            .LookupAsync(session, expectation, ct);
+    }
+
+    public Task<Core.CopyDesign.Apply.CopyDesignDurableResumeStatusResult> GetDurableCopyDesignOperationStatusAsync(
+        IArchSession session, string operationId, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        return new CopyDesign.HttpDurableCopyDesignOperationStatusClient(Server, _http, _options.Timeout)
+            .GetRawStatusAsync(session, operationId, ct);
+    }
+
     private CheckoutOrchestrator Orchestrator(IArchSession session) =>
         new(Server, session, _http, _options.Timeout, clock: null, editorProbe: _options.EditorProbe);
 
@@ -236,6 +258,20 @@ public sealed class ArchApiClient : IArchApi
         ArgumentNullException.ThrowIfNull(cadDocumentIds);
         return new HttpLatestVersionProbe(Server, _http, _options.Timeout)
             .LookupAsync(session, cadDocumentIds, ct);
+    }
+
+    // ---- Drawing association authority (P6D) --------------------------
+
+    public Task<IReadOnlyDictionary<string, Core.CopyDesign.DrawingAssociationResult>> GetDrawingAssociationsAsync(
+        IArchSession session,
+        IReadOnlyCollection<string> modelCadDocumentIds,
+        WorkspaceManifest? manifest,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(modelCadDocumentIds);
+        return new CopyDesign.HttpDrawingAssociationClient(Server, _http, _options.Timeout)
+            .FetchAsync(session, modelCadDocumentIds, manifest, ct);
     }
 
     // ---- future scope: declared, not implemented --------------------

@@ -9,10 +9,24 @@ using InventorApi = Inventor;
 namespace Arch.CadConnect.Inventor.CopyDesign;
 
 /// <summary>
-/// P6C: physically creates ONE COPY destination via Inventor's documented
-/// "Save Copy As" primitive - <c>Document.SaveAs(FileName, SaveCopyAs: true)</c>
-/// (confirmed against the actual Autodesk.Inventor.Interop 29.0.0.0
-/// (Inventor 2025) assembly: <c>SaveAs(String FileName, Boolean SaveCopyAs)</c>).
+/// P6C/P6D: physically creates ONE COPY destination via Inventor's documented
+/// "Save Copy As" primitives - <c>Document.SaveAs(FileName, SaveCopyAs: true)</c>
+/// for an IPT/IAM/IDW, and <c>DrawingDocument.SaveAsInventorDWG(FileName, SaveCopyAs: true)</c>
+/// for an Inventor DWG drawing (both confirmed against the actual
+/// Autodesk.Inventor.Interop 29.0.0.0 (Inventor 2025) assembly via reflection
+/// against the real interop DLL: <c>DrawingDocument</c> exposes a DEDICATED
+/// <c>SaveAsInventorDWG(String FullFileName, Boolean SaveCopyAs)</c> method
+/// alongside the ordinary <c>SaveAs</c>/<c>SaveAs2</c> - Autodesk's own
+/// distinct entry point for producing a DWG-format save, so an Inventor DWG
+/// source is NEVER routed through the plain <c>SaveAs</c> that IPT/IAM/IDW
+/// use).
+///
+/// IDW vs DWG: Inventor's own <c>DocumentTypeEnum</c> reports BOTH as
+/// <c>kDrawingDocumentObject</c> - there is no separate "IDW document type"
+/// enum value. The two are distinguished ONLY by <c>DrawingDocument.IsInventorDWG</c>
+/// (also confirmed via reflection) - <see cref="ExpectedDrawingIsInventorDwg"/>
+/// is checked in ADDITION to <c>DocumentType</c> for every IDW/DWG node, so a
+/// plan expecting one drawing format never silently accepts the other.
 ///
 /// WHY SaveCopyAs, not a byte copy: per Inventor's own documented semantics,
 /// <c>SaveCopyAs: true</c> writes a COPY of the CURRENTLY-LOADED in-memory
@@ -63,10 +77,57 @@ namespace Arch.CadConnect.Inventor.CopyDesign;
 ///  failure, a lost destination race, or a failed promotion) - a
 ///  pre-existing/racing file at the FINAL path is never touched by any of
 ///  this, and a successful operation always leaves zero temp artifacts.
+///
+/// P6D ROUND 2, CRITICAL fix - a DRAWING's SaveAs/SaveAsInventorDWG is
+///  DIFFERENT from an IPT/IAM's SaveAs in one crucial way: a drawing's
+///  in-memory document graph directly holds live references to its model
+///  document(s) (see <see cref="Inventor.CopyDesign.InventorCopyDesignDrawingReferenceRewirer"/>'s
+///  own doc comment), and Inventor's Save engine can, for a document with
+///  out-of-date or otherwise "needs saving" references, cascade-save those
+///  REFERENCED documents too - even for a SaveCopyAs. If one of those
+///  referenced documents happens to be Dirty (unsaved user edits) - most
+///  dangerously a REUSE target, which Copy Design must NEVER mutate at all,
+///  or a COPY source, whose pre-mutation SHA-256 baseline would then
+///  silently describe stale bytes - that would be a genuine source-
+///  immutability violation. <c>Application.SilentOperation</c> only
+///  suppresses UI prompts; it says NOTHING about which documents the Save
+///  engine decides to persist, so it is NEVER treated as a safety guarantee
+///  here. Confirmed via reflection against the real interop assembly that
+///  NEITHER <c>SaveAs</c> NOR <c>SaveAsInventorDWG</c> exposes a
+///  "SaveDependents" parameter at all (unlike <c>Save2</c>, which
+///  <see cref="Inventor.CopyDesign.InventorCopyDesignDrawingReferenceRewirer"/>
+///  uses for exactly this reason) - so for THESE two calls the only
+///  available defense is PREVENTION: <see cref="InventorDrawingDependentSafety.Evaluate"/>
+///  enumerates every document Inventor currently has LOADED that this
+///  drawing references (<c>Document.AllReferencedDocuments</c> - the
+///  complete closure, not merely the direct set) and fails closed via
+///  <see cref="CopyDesignDrawingDependentSafetyGuard"/> (PURE, Core, no COM)
+///  if ANY of them is Dirty - BEFORE SaveAs/SaveAsInventorDWG is ever
+///  called. Only checked for an IDW/DWG node - an IPT never references
+///  anything, and P6C's existing IAM copy path is unchanged/out of this
+///  round's scope.
+///
+/// P6D LIVE BLOCKER fix ("drawing remains Dirty after source IDW is
+///  closed") - a drawing this class opens itself (<c>wasAlreadyOpen ==
+///  false</c>) can come back <c>Dirty</c> SOLELY because Inventor's own
+///  document loader resolves/loads the drawing's referenced model
+///  documents and evaluates whether cached view representations are out of
+///  date - a load-time side effect, never a user action, and never
+///  something this class's own code causes (nothing between
+///  <c>Documents.Open</c> and the Dirty check below mutates anything).
+///  Unconditionally rejecting this (as before this fix) blocks a
+///  perfectly-safe resume for no real reason. The Dirty check now defers
+///  to <see cref="CopyDesignSourceDirtyProvenanceGuard"/> (PURE, Core, no
+///  COM) - see its own doc comment for the exact, non-weakening
+///  distinction: a document already open before this operation touched it
+///  is STILL rejected unconditionally while Dirty (unchanged); a document
+///  this class opened itself may proceed ONLY when the on-disk bytes,
+///  re-hashed from disk immediately after open, still exactly match the
+///  orchestrator's own pre-mutation SHA-256 baseline for this node.
 /// </summary>
-internal sealed class InventorCopyDesignPhysicalCopier(InventorApi.Application application) : ICopyDesignPhysicalCopier
+internal sealed class InventorCopyDesignPhysicalCopier(InventorApi.Application application, ICopyDesignFileHasher hasher) : ICopyDesignPhysicalCopier
 {
-    public Task<CopyDesignPhysicalCopyResult> CopyAsync(CopyDesignNode node, CancellationToken ct)
+    public Task<CopyDesignPhysicalCopyResult> CopyAsync(CopyDesignNode node, string sourceSha256BeforeOperation, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(node);
         ct.ThrowIfCancellationRequested();
@@ -93,9 +154,7 @@ internal sealed class InventorCopyDesignPhysicalCopier(InventorApi.Application a
             return Task.FromResult(new CopyDesignPhysicalCopyResult(false, "The destination path has no usable directory."));
         }
 
-        var expectedType = node.DocumentType == CadDocumentType.Iam
-            ? InventorApi.DocumentTypeEnum.kAssemblyDocumentObject
-            : InventorApi.DocumentTypeEnum.kPartDocumentObject;
+        var expectedType = ExpectedDocumentType(node.DocumentType);
 
         var wasAlreadyOpen = TryFindLoadedDocument(node.SourceAbsolutePath, out var document);
         var silentBefore = application.SilentOperation;
@@ -122,21 +181,66 @@ internal sealed class InventorCopyDesignPhysicalCopier(InventorApi.Application a
                 return Task.FromResult(new CopyDesignPhysicalCopyResult(
                     false, "The source document's actual type does not match the plan's expected document type."));
             }
+            if (node.DocumentType is CadDocumentType.Idw or CadDocumentType.Dwg)
+            {
+                // kDrawingDocumentObject alone does not distinguish IDW from
+                // Inventor DWG - see the class doc comment. A mismatch here
+                // (e.g. the plan expected an IDW but the actual on-disk file
+                // is an Inventor DWG, or vice versa) is exactly the same kind
+                // of "actual type does not match expected" failure as above,
+                // fails closed the same way, and is never silently coerced by
+                // just picking whichever SaveAs variant matches the ACTUAL
+                // file - the plan's expectation is authoritative.
+                if (document is not InventorApi.DrawingDocument drawingSource
+                    || drawingSource.IsInventorDWG != (node.DocumentType == CadDocumentType.Dwg))
+                {
+                    return Task.FromResult(new CopyDesignPhysicalCopyResult(
+                        false, "The source drawing's actual format (IDW vs Inventor DWG) does not match the plan's expected document type."));
+                }
+            }
 
-            // MEDIUM 1 fix: reject a Dirty source REGARDLESS of whether P6C
-            // itself opened it or found it already open - a document P6C
-            // just opened can still come back Dirty (e.g. an automatic
-            // out-of-date-reference update Inventor applies on open), and
-            // SaveCopyAs would then copy THAT unsaved in-memory state, not
-            // the on-disk bytes the captured source SHA-256 baseline
-            // describes. Never save the dirty source either way - only
-            // close what P6C itself opened (see the `finally` below), and
-            // always with SkipSave.
+            // P6D LIVE BLOCKER fix: a document already open BEFORE this
+            // operation touched it is STILL rejected unconditionally while
+            // Dirty - never weakened, see CopyDesignSourceDirtyProvenanceGuard's
+            // own doc comment. A document THIS class opened itself may
+            // proceed ONLY when the on-disk bytes, re-hashed from disk
+            // (never from Inventor's in-memory state) right now, still
+            // exactly match the orchestrator's own pre-mutation baseline -
+            // proof the Dirty flag is Inventor's own load-time side effect
+            // (e.g. resolving/loading this drawing's referenced models),
+            // never a content change and never a user edit (a closed file
+            // has no in-memory session that could hold one). Never saves
+            // the dirty source either way - only closes what this class
+            // itself opened (see the `finally` below), and always with
+            // SkipSave.
             if (document.Dirty)
             {
-                return Task.FromResult(new CopyDesignPhysicalCopyResult(
-                    false, "The source document is Dirty (has unsaved changes) - save or close it before copying, " +
-                           "so the copy corresponds to the checked-in source, not unsaved in-memory edits."));
+                string? postOpenHash = null;
+                try { postOpenHash = hasher.ComputeSha256(node.SourceAbsolutePath); }
+                catch { /* left null - the guard treats this as unproven, never a pass */ }
+
+                var provenance = CopyDesignSourceDirtyProvenanceGuard.Evaluate(
+                    node.SourceFileName, wasAlreadyOpen, dirty: true, postOpenHash, sourceSha256BeforeOperation);
+                if (!provenance.Safe)
+                {
+                    return Task.FromResult(new CopyDesignPhysicalCopyResult(false, provenance.FailureReason));
+                }
+                // else: proven load-time-only Dirty side effect on a
+                // document this class itself opened from provably-
+                // untouched bytes - fall through and proceed exactly as if
+                // the document were clean.
+            }
+
+            // P6D ROUND 2, CRITICAL fix: see the class doc comment. Checked
+            // ONLY for a drawing - its referenced model document(s) could be
+            // saved as a side effect of SaveAs/SaveAsInventorDWG.
+            if (node.DocumentType is CadDocumentType.Idw or CadDocumentType.Dwg)
+            {
+                var dependentSafety = InventorDrawingDependentSafety.Evaluate(document);
+                if (!dependentSafety.Safe)
+                {
+                    return Task.FromResult(new CopyDesignPhysicalCopyResult(false, dependentSafety.FailureReason));
+                }
             }
 
             Directory.CreateDirectory(destinationDir);
@@ -154,7 +258,18 @@ internal sealed class InventorCopyDesignPhysicalCopier(InventorApi.Application a
             // verification - both re-open the FINAL path fresh) can ever
             // observe or bind to the temp identity.
             tempPath = CopyDesignAtomicPromotion.NewTempPath(destination);
-            document.SaveAs(tempPath, SaveCopyAs: true);
+            if (node.DocumentType == CadDocumentType.Dwg)
+            {
+                // Autodesk's dedicated DWG-format save entry point - see the
+                // class doc comment. Only ever reached after the IsInventorDWG
+                // check above confirmed the source IS actually a DWG-format
+                // drawing.
+                ((InventorApi.DrawingDocument)document).SaveAsInventorDWG(tempPath, SaveCopyAs: true);
+            }
+            else
+            {
+                document.SaveAs(tempPath, SaveCopyAs: true);
+            }
         }
         catch (COMException ex)
         {
@@ -229,6 +344,17 @@ internal sealed class InventorCopyDesignPhysicalCopier(InventorApi.Application a
         }
         return Task.FromResult(new CopyDesignPhysicalCopyResult(true, null));
     }
+
+    /// <summary>P6D: IDW and Inventor DWG both report
+    ///  <c>kDrawingDocumentObject</c> - see the class doc comment for why a
+    ///  SECOND check (<c>IsInventorDWG</c>) is required in addition to
+    ///  this.</summary>
+    private static InventorApi.DocumentTypeEnum ExpectedDocumentType(CadDocumentType type) => type switch
+    {
+        CadDocumentType.Iam => InventorApi.DocumentTypeEnum.kAssemblyDocumentObject,
+        CadDocumentType.Idw or CadDocumentType.Dwg => InventorApi.DocumentTypeEnum.kDrawingDocumentObject,
+        _ => InventorApi.DocumentTypeEnum.kPartDocumentObject,
+    };
 
     private bool TryFindLoadedDocument(string absolutePath, out InventorApi.Document? document)
     {

@@ -1,3 +1,5 @@
+using System.Linq;
+
 using Arch.CadConnect.Api;
 using Arch.CadConnect.Api.Dtos;
 using Arch.CadConnect.Core.Connection;
@@ -64,8 +66,41 @@ public class ArchConnectionManagerTests
             LastLatestVersionIds = ids;
             return Task.FromResult(OnGetLatestVersions?.Invoke() ?? LatestVersionLookup.WholeFailure(LatestVersionOutcome.LookupUnavailable));
         }
+        public IReadOnlyCollection<string>? LastDrawingAssociationIds { get; private set; }
+        public WorkspaceManifest? LastDrawingAssociationManifest { get; private set; }
+        public Func<IReadOnlyDictionary<string, Arch.CadConnect.Core.CopyDesign.DrawingAssociationResult>>? OnGetDrawingAssociations { get; set; }
+        public Task<IReadOnlyDictionary<string, Arch.CadConnect.Core.CopyDesign.DrawingAssociationResult>> GetDrawingAssociationsAsync(
+            IArchSession s, IReadOnlyCollection<string> modelCadDocumentIds, WorkspaceManifest? manifest, CancellationToken ct = default)
+        {
+            LastDrawingAssociationIds = modelCadDocumentIds;
+            LastDrawingAssociationManifest = manifest;
+            return Task.FromResult(OnGetDrawingAssociations?.Invoke()
+                ?? modelCadDocumentIds.ToDictionary(id => id, _ => Arch.CadConnect.Core.CopyDesign.DrawingAssociationResult.NotAvailable));
+        }
         public Task<WhereUsedDto> GetWhereUsedAsync(IArchSession s, string id, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Where Used");
         public Task<ReleaseInfoDto> GetReleaseInfoAsync(IArchSession s, string r, CancellationToken ct = default) => throw ArchApiException.NotImplemented("Release information");
+
+        public string? LastOperationStatusId { get; private set; }
+        public Func<Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignOperationStatusResult>? OnGetCopyDesignOperationStatus { get; set; }
+        public Task<Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignOperationStatusResult> GetCopyDesignOperationStatusAsync(
+            IArchSession s, Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignOperationStatusExpectation expectation, CancellationToken ct = default)
+        {
+            LastOperationStatusId = expectation.OperationId;
+            return Task.FromResult(OnGetCopyDesignOperationStatus?.Invoke()
+                ?? Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignOperationStatusResult.Failure(
+                    Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignOperationStatusOutcome.NotFound));
+        }
+
+        public string? LastDurableOperationStatusId { get; private set; }
+        public Func<Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignDurableResumeStatusResult>? OnGetDurableCopyDesignOperationStatus { get; set; }
+        public Task<Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignDurableResumeStatusResult> GetDurableCopyDesignOperationStatusAsync(
+            IArchSession s, string operationId, CancellationToken ct = default)
+        {
+            LastDurableOperationStatusId = operationId;
+            return Task.FromResult(OnGetDurableCopyDesignOperationStatus?.Invoke()
+                ?? new Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignDurableResumeStatusResult(
+                    Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignDurableResumeStatusOutcome.NotFound));
+        }
     }
 
     private static IArchSession Session(DateTimeOffset? expires = null) => new DesktopSession(
@@ -324,6 +359,52 @@ public class ArchConnectionManagerTests
         Assert.Equal(new[] { "cad_a" }, api.LastLatestVersionIds);
         Assert.Equal(LatestVersionOutcome.Found, lookup.Get("cad_a").Outcome);
         Assert.Equal("fv_a2", lookup.Get("cad_a").Version!.LatestFileVersionId);
+    }
+
+    // ---- P6D drawing association authority -----------------------------
+
+    [Fact]
+    public async Task GetDrawingAssociations_without_a_session_fails_closed_to_NotAvailable_never_calls_the_api()
+    {
+        var mgr = new ArchConnectionManager(s => new FakeApi(s), new InMemorySessionStore());
+
+        var result = await mgr.GetDrawingAssociationsAsync(new[] { "cad_root_iam" }, manifest: null);
+
+        Assert.Equal(
+            Arch.CadConnect.Core.CopyDesign.DrawingAssociationOutcome.NotAvailable,
+            result["cad_root_iam"].Outcome);
+    }
+
+    [Fact]
+    public async Task GetDrawingAssociations_with_a_session_delegates_the_EXACT_current_stable_ids_and_manifest_to_the_api()
+    {
+        var store = new InMemorySessionStore();
+        FakeApi api = null!;
+        var mgr = new ArchConnectionManager(server => api = new FakeApi(server)
+        {
+            OnSignIn = () => Session(),
+            OnGetDrawingAssociations = () => new Dictionary<string, Arch.CadConnect.Core.CopyDesign.DrawingAssociationResult>
+            {
+                ["cad_root_iam"] = new(Arch.CadConnect.Core.CopyDesign.DrawingAssociationOutcome.Found,
+                    new[]
+                    {
+                        new Arch.CadConnect.Core.CopyDesign.AssociatedDrawing(
+                            "cad_root_idw", "fv_idw_1", null, Arch.CadConnect.Core.CadDocumentType.Idw, true, "test"),
+                    }),
+            },
+        }, store);
+        await mgr.SignInAsync("https://plm.example.com", "t@o.com", "pw");
+
+        // P6D: the request must carry the CURRENT stable model id, not a
+        // stale/pre-cleanup fixture id and not a documentNumber/filename.
+        var requestedIds = new[] { "cad_root_iam" };
+        var result = await mgr.GetDrawingAssociationsAsync(requestedIds, manifest: null);
+
+        Assert.Equal(requestedIds, api.LastDrawingAssociationIds);
+        Assert.Equal(
+            Arch.CadConnect.Core.CopyDesign.DrawingAssociationOutcome.Found,
+            result["cad_root_iam"].Outcome);
+        Assert.Equal("cad_root_idw", result["cad_root_iam"].Drawings.Single().CadDocumentId);
     }
 
     private async Task<(ArchConnectionManager Mgr, InMemorySessionStore Store)> ConnectedManager(

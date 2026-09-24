@@ -51,6 +51,39 @@ internal sealed class ArchAddInController : IDisposable
     ///  doc comment for why a single global guard is sufficient here.</summary>
     private readonly Core.CopyDesign.Apply.CopyDesignApplyOperationGuard _copyDesignApplyGuard = new();
 
+    /// <summary>P6D ROUND 2 (RESUME): the LAST Apply Copy Design attempt that
+    ///  ended <see cref="Core.CopyDesign.Apply.CopyDesignApplyOperationResult.ReservedButUnmaterialized"/>
+    ///  - i.e. genuinely resumable - remembered ONLY in this add-in
+    ///  session's memory (never persisted to disk; does not survive an
+    ///  Inventor restart - see the P6D report's "remaining limitations").
+    ///  <see cref="ArchCommand.CopyDesignResume"/> is the ONLY thing that
+    ///  ever reads this, and ONLY on an explicit, deliberate user action -
+    ///  an ordinary "Apply Copy Design" never silently reinterprets itself
+    ///  as a resume. Cleared once an attempt (fresh or resumed) fully
+    ///  succeeds.</summary>
+    private (Core.CopyDesign.CopyDesignPlan Plan, string IdempotencyKey, string? Label)? _resumableCopyDesignAttempt;
+
+    /// <summary>P6D ROUND 3, item F: the LAST Apply Copy Design attempt whose
+    ///  reservation call itself never returned a trustworthy answer (the
+    ///  server may or may not have committed it - genuinely UNKNOWN),
+    ///  remembered ONLY in this session's memory, exactly like
+    ///  <see cref="_resumableCopyDesignAttempt"/> but for a CATEGORICALLY
+    ///  DIFFERENT situation: here there is no confirmed
+    ///  <c>copyDesignOperationId</c> at all, so the idempotency key ALONE is
+    ///  the recovery handle. <see cref="ArchCommand.CopyDesignRecover"/> is
+    ///  the ONLY thing that ever reads this, and ONLY on an explicit,
+    ///  deliberate user action - never auto-retried beyond the orchestrator's
+    ///  own existing bounded transport retry. Mutually exclusive with
+    ///  <see cref="_resumableCopyDesignAttempt"/> for the SAME attempt (an
+    ///  attempt is either "reservation confirmed, something later failed" or
+    ///  "reservation itself unconfirmed" - never both); see
+    ///  <see cref="ExecuteCopyDesignAttempt"/>'s <c>onDone</c> for the single
+    ///  place both are written. Cleared once an attempt (fresh, resumed, or
+    ///  recovered) fully succeeds, OR once a retry establishes a confirmed
+    ///  reservation (which then becomes resumable instead, if still
+    ///  unmaterialized).</summary>
+    private (Core.CopyDesign.CopyDesignPlan Plan, string IdempotencyKey, string? Label)? _uncertainCopyDesignAttempt;
+
     private bool _disposed;
 
     public ArchAddInController(InventorApi.Application application)
@@ -111,7 +144,10 @@ internal sealed class ArchAddInController : IDisposable
             currentWorkspaceRoot: SafeLastWorkspaceRoot());
 
         var map = RibbonCommandPolicy.Evaluate(
-            _connection.State, doc, role, hasRememberedUndoTarget: _undoTarget.Current is not null);
+            _connection.State, doc, role,
+            hasRememberedUndoTarget: _undoTarget.Current is not null,
+            hasResumableCopyDesignAttempt: _resumableCopyDesignAttempt is not null,
+            hasUncertainCopyDesignAttempt: _uncertainCopyDesignAttempt is not null);
         _ribbon.ApplyEnablement(map);
     }
 
@@ -188,6 +224,14 @@ internal sealed class ArchAddInController : IDisposable
 
             case ArchCommand.CopyDesignPreview:
                 RunCopyDesignPreview();
+                break;
+
+            case ArchCommand.CopyDesignResume:
+                RunCopyDesignResume();
+                break;
+
+            case ArchCommand.CopyDesignRecover:
+                RunCopyDesignRecover();
                 break;
 
             default:
@@ -442,13 +486,53 @@ internal sealed class ArchAddInController : IDisposable
             return;
         }
 
+        // P6D DRAWING ASSOCIATION AUTHORITY: fetch the REAL server authority
+        // (DRAWING_REFERENCE rows) for every candidate model BEFORE planning -
+        // CopyDesignPlanner's IDrawingAssociationSource is synchronous, so the
+        // one network round trip must happen here, not inside Plan(). Never
+        // guesses from a scanner-discovered drawing node or a file name; a
+        // network/auth/contract failure fails every candidate closed to
+        // NotAvailable, exactly like the previous NoDrawingAssociationSource
+        // stub - this only REPLACES "always unavailable" with "actually
+        // asked, and unavailable only when the ask itself failed."
+        var candidateIds = CopyDesignDrawingAssociationCandidates.From(scan);
+        var destinationFolder = input.DestinationFolder;
+
+        if (candidateIds.Count == 0)
+        {
+            ContinueCopyDesignPreview(scan, nameRule, destinationFolder,
+                new PrefetchedDrawingAssociationSource(new Dictionary<string, DrawingAssociationResult>()));
+            return;
+        }
+
+        var localManifest = WorkspaceRootLocator.FindRootForFile(_tracker.Current.FullPath) is { } localRoot
+            ? WorkspaceManifest.LoadOrEmpty(localRoot)
+            : null;
+
+        IReadOnlyDictionary<string, DrawingAssociationResult>? associations = null;
+        RunBackground(
+            async ct => associations = await _connection.GetDrawingAssociationsAsync(candidateIds, localManifest, ct),
+            "Checking drawing associations",
+            onDone: () => ContinueCopyDesignPreview(scan, nameRule, destinationFolder,
+                new PrefetchedDrawingAssociationSource(
+                    associations ?? new Dictionary<string, DrawingAssociationResult>())),
+            timeout: TimeSpan.FromSeconds(60));
+    }
+
+    private void ContinueCopyDesignPreview(
+        CadReferenceScan scan,
+        IDestinationNameRule nameRule,
+        string destinationFolder,
+        IDrawingAssociationSource drawingSource)
+    {
         // The ONLY filesystem read this command performs: a best-effort,
         // read-only existence check of each proposed destination, scoped to
         // the destination folder the engineer just chose. Never a write.
         var plan = CopyDesignPlanner.Plan(
             scan,
             nameRule,
-            input.DestinationFolder,
+            destinationFolder,
+            drawingSource: drawingSource,
             destinationExists: SafeFileExists);
 
         // Round 6: give the engineer the ONLY supported way to resolve a
@@ -472,7 +556,8 @@ internal sealed class ArchAddInController : IDisposable
                     plan = CopyDesignPlanner.Plan(
                         scan,
                         nameRule,
-                        input.DestinationFolder,
+                        destinationFolder,
+                        drawingSource: drawingSource,
                         destinationExists: SafeFileExists,
                         explicitDecisions: appliedDecisions);
                 }
@@ -494,7 +579,8 @@ internal sealed class ArchAddInController : IDisposable
             var probe = CopyDesignPlanner.Plan(
                 scan,
                 nameRule,
-                input.DestinationFolder,
+                destinationFolder,
+                drawingSource: drawingSource,
                 destinationExists: SafeFileExists,
                 explicitDecisions: appliedDecisions,
                 acknowledgeModelFilesOnly: true);
@@ -553,11 +639,317 @@ internal sealed class ArchAddInController : IDisposable
             return;
         }
 
+        // A fresh, explicit confirmation ALWAYS mints a brand-new
+        // idempotency key - this is precisely what distinguishes an
+        // ordinary Apply from a RESUME/RECOVER (see RunCopyDesignResume /
+        // RunCopyDesignRecover below) and is never silently reinterpreted
+        // either way. P6D ROUND 3: a brand-new key also means a normal Apply
+        // can NEVER accidentally consume an outstanding
+        // _uncertainCopyDesignAttempt's key - that key is only ever reused by
+        // an explicit Recover.
         var attempt = Core.CopyDesign.Apply.CopyDesignApplyAttempt.StartNewAttempt();
+        ExecuteCopyDesignAttempt(plan, attempt.IdempotencyKey, label: null, CopyDesignAttemptKind.Fresh);
+    }
+
+    /// <summary>
+    /// P6D ROUND 2, HIGH fix (RESUME): the deliberate, explicit, controlled
+    /// retry of the LAST Apply Copy Design attempt. Two paths, chosen ONLY
+    /// by whether this session still remembers one in memory:
+    ///
+    ///   - <see cref="_resumableCopyDesignAttempt"/> present (the ORIGINAL,
+    ///     unchanged in-session path): reuses the EXACT SAME plan and
+    ///     idempotencyKey as the failed attempt (never a fresh key - see
+    ///     <see cref="Core.CopyDesign.Apply.CopyDesignApplyAttempt.Resume"/>).
+    ///
+    ///   - P6D PRODUCTION RECOVERY: no in-memory attempt (e.g. Inventor was
+    ///     restarted since the failure) - <see cref="RunDurableCopyDesignResume"/>
+    ///     offers a DURABLE resume by explicit operation id, reconstructing
+    ///     the SAME attempt from the server's own authoritative status (see
+    ///     <see cref="Core.CopyDesign.Apply.CopyDesignResumeAttemptReconstructor"/>'s
+    ///     own doc comment) rather than being lost with the session.
+    ///
+    /// Either way, the server's already-idempotent reservation resolves to
+    /// the SAME operation/entries/resultingCadDocumentIds, never a duplicate
+    /// CadDocument - see <see cref="Core.CopyDesign.Apply.CopyDesignApplyOrchestrator"/>'s
+    /// own class doc comment ("RESUME") for the full mechanism.
+    /// </summary>
+    private void RunCopyDesignResume()
+    {
+        if (_resumableCopyDesignAttempt is not { } resumable)
+        {
+            RunDurableCopyDesignResume();
+            return;
+        }
+
+        using var confirm = new CopyDesignResumeConfirmDialog(resumable.Plan, resumable.IdempotencyKey);
+        if (confirm.ShowDialog(new Win32Owner(SafeMainHwnd())) != DialogResult.OK)
+        {
+            return;
+        }
+
+        if (_connection.State != ConnectionState.Connected)
+        {
+            Error("Sign in to Arch PLM before resuming a Copy Design attempt.");
+            return;
+        }
+
+        ExecuteCopyDesignAttempt(resumable.Plan, resumable.IdempotencyKey, resumable.Label, CopyDesignAttemptKind.Resume);
+    }
+
+    /// <summary>
+    /// P6D PRODUCTION RECOVERY: the DURABLE resume path - reachable ONLY
+    /// when this session has no in-memory <see cref="_resumableCopyDesignAttempt"/>.
+    /// Collects an EXPLICIT operation id + source workspace + destination
+    /// folder (never a silent scan of every operation, never a guess - see
+    /// <see cref="CopyDesignDurableResumeDialog"/>'s own doc comment), then
+    /// queries the server's authoritative status for EXACTLY that operation
+    /// id and hands it to <see cref="Core.CopyDesign.Apply.CopyDesignResumeAttemptReconstructor"/>.
+    /// Fails closed (a plain, honest message - never a guess, never a
+    /// partial reconstruction) at any point the server status, the source
+    /// workspace, or the drawing-dependency authority cannot fully prove the
+    /// attempt is safe to continue.
+    /// </summary>
+    private void RunDurableCopyDesignResume()
+    {
+        if (_connection.State != ConnectionState.Connected)
+        {
+            Error("Sign in to Arch PLM before resuming a Copy Design attempt.");
+            return;
+        }
+
+        using var input = new CopyDesignDurableResumeDialog();
+        if (input.ShowDialog(new Win32Owner(SafeMainHwnd())) != DialogResult.OK)
+        {
+            return;
+        }
+
+        // Load the SOURCE workspace manifest up front - local, synchronous,
+        // read-only I/O - so an obviously wrong folder fails fast, before
+        // any network call at all.
+        WorkspaceManifest sourceManifest;
+        try
+        {
+            sourceManifest = WorkspaceManifest.LoadOrEmpty(input.SourceWorkspaceRoot);
+        }
+        catch (Exception ex) when (ex is IOException or WorkspaceRootException or UnauthorizedAccessException)
+        {
+            Error($"Could not read the source workspace folder: {ex.Message}");
+            return;
+        }
+        if (sourceManifest.Entries.Count == 0)
+        {
+            Error("The source workspace folder has no recognized managed workspace manifest "
+                + "(.arch\\workspace.json) - choose the folder Get Latest originally materialized these "
+                + "documents into.");
+            return;
+        }
+
+        var operationId = input.OperationId;
+        var destinationFolder = input.DestinationFolder;
+
+        Core.CopyDesign.Apply.CopyDesignDurableResumeStatusResult? status = null;
+        RunBackground(
+            async ct => status = await _connection.GetDurableCopyDesignOperationStatusAsync(operationId, ct),
+            "Looking up Copy Design operation",
+            onDone: () => ContinueDurableCopyDesignResume(status, sourceManifest, destinationFolder),
+            timeout: TimeSpan.FromSeconds(60));
+    }
+
+    /// <summary>Second step of the durable resume: the operation's
+    ///  authoritative status is now known - fetch the AUTHORITATIVE drawing
+    ///  dependency mapping (the SAME drawing-association authority the P6D
+    ///  live-blocker fix already uses) for whichever model entries this
+    ///  operation actually reserved, so a pending drawing entry's rewiring
+    ///  target is never guessed from a file name.</summary>
+    private void ContinueDurableCopyDesignResume(
+        Core.CopyDesign.Apply.CopyDesignDurableResumeStatusResult? status,
+        WorkspaceManifest sourceManifest,
+        string destinationFolder)
+    {
+        if (status is null || !status.Success)
+        {
+            Error("Could not obtain the authoritative status of this Copy Design operation "
+                + $"({status?.Outcome.ToString() ?? "unknown"}) - nothing was resumed. Confirm the operation id and "
+                + "try again.");
+            return;
+        }
+
+        var modelSourceIds = (status.Entries ?? Array.Empty<Core.CopyDesign.Apply.CopyDesignDurableResumeEntry>())
+            .Where(e => e.Action == "COPY" && e.SourceCadDocumentId is not null && e.OriginalDocumentType is "IAM" or "IPT")
+            .Select(e => e.SourceCadDocumentId!)
+            .Distinct()
+            .ToArray();
+
+        IReadOnlyDictionary<string, Core.CopyDesign.DrawingAssociationResult>? associations = null;
+        RunBackground(
+            async ct => associations = modelSourceIds.Length == 0
+                ? new Dictionary<string, Core.CopyDesign.DrawingAssociationResult>()
+                : await _connection.GetDrawingAssociationsAsync(modelSourceIds, sourceManifest, ct),
+            "Checking drawing associations",
+            onDone: () => FinishDurableCopyDesignResume(status, sourceManifest, destinationFolder, associations),
+            timeout: TimeSpan.FromSeconds(60));
+    }
+
+    /// <summary>Final step: reconstruct the exact original attempt (fails
+    ///  closed with an honest reason on anything unsafe/ambiguous) and, on
+    ///  success, run it through the EXACT SAME confirmation + execution path
+    ///  as an in-session resume - never a separate, less-safe path.</summary>
+    private void FinishDurableCopyDesignResume(
+        Core.CopyDesign.Apply.CopyDesignDurableResumeStatusResult status,
+        WorkspaceManifest sourceManifest,
+        string destinationFolder,
+        IReadOnlyDictionary<string, Core.CopyDesign.DrawingAssociationResult>? associations)
+    {
+        var operationModelSourceIds = new HashSet<string>(
+            (status.Entries ?? Array.Empty<Core.CopyDesign.Apply.CopyDesignDurableResumeEntry>())
+                .Where(e => e.Action == "COPY" && e.SourceCadDocumentId is not null && e.OriginalDocumentType is "IAM" or "IPT")
+                .Select(e => e.SourceCadDocumentId!));
+
+        // Invert "model -> its drawings" (what the authority answers) into
+        // "drawing -> the models (from THIS operation only) it depends on" -
+        // what the reconstructor needs. A drawing/model pair the authority
+        // names that is NOT part of this operation is silently excluded
+        // here (never trusted) - the reconstructor itself still fails
+        // closed if a PENDING drawing ends up with no confirmed dependency.
+        var dependencies = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        if (associations is not null)
+        {
+            foreach (var (modelSourceId, result) in associations)
+            {
+                if (result.Outcome != Core.CopyDesign.DrawingAssociationOutcome.Found
+                    || !operationModelSourceIds.Contains(modelSourceId))
+                {
+                    continue;
+                }
+                foreach (var drawing in result.Drawings)
+                {
+                    if (drawing.CadDocumentId is null)
+                    {
+                        continue;
+                    }
+                    if (!dependencies.TryGetValue(drawing.CadDocumentId, out var set))
+                    {
+                        set = new HashSet<string>(StringComparer.Ordinal);
+                        dependencies[drawing.CadDocumentId] = set;
+                    }
+                    set.Add(modelSourceId);
+                }
+            }
+        }
+
+        var reconstruction = Core.CopyDesign.Apply.CopyDesignResumeAttemptReconstructor.Reconstruct(
+            status, sourceManifest, destinationFolder,
+            dependencies.ToDictionary(kv => kv.Key, kv => (IReadOnlySet<string>)kv.Value, StringComparer.Ordinal));
+        if (!reconstruction.Success)
+        {
+            Error($"Could not safely reconstruct this Copy Design attempt: {reconstruction.FailureReason}");
+            return;
+        }
+
+        // P6D DURABLE RESUME LIVE BLOCKER fix: an EARLY, clear, itemized
+        // check for the single most common way a durable resume fails -
+        // the destination folder the user just typed does not actually
+        // hold the file(s) the server already reports MATERIALIZED. Left
+        // to the real orchestrator alone, this surfaces later as a single,
+        // terse UnexpectedMaterializationState reason for only the FIRST
+        // such entry, inside a result dialog whose text box does not wrap
+        // long lines - easy to misread as truncated. This check changes
+        // NOTHING about what is allowed to proceed: it is purely additive,
+        // read-only, and the orchestrator's own authoritative destination +
+        // hash/size re-verification (immediately before any mutation) still
+        // runs completely unchanged right after this.
+        var missingMaterialized = Core.CopyDesign.Apply.CopyDesignResumeAttemptReconstructor.FindMissingMaterializedDestinations(
+            status, destinationFolder, File.Exists);
+        if (missingMaterialized.Count > 0)
+        {
+            var list = string.Join(Environment.NewLine, missingMaterialized.Select(m => $"  - {m.OriginalFileName}"
+                + Environment.NewLine + $"      expected at: {m.ExpectedPath}"));
+            Error("The server already reports the following file(s) as materialized by this Copy Design operation, "
+                + $"but they were not found in the destination folder you entered (\"{destinationFolder}\"):"
+                + Environment.NewLine + Environment.NewLine + list
+                + Environment.NewLine + Environment.NewLine
+                + "This almost always means the destination folder does not match the one the original attempt "
+                + "copied into. Re-enter the exact original destination folder and try again - nothing was changed.");
+            return;
+        }
+
+        using var confirm = new CopyDesignResumeConfirmDialog(reconstruction.Plan!, reconstruction.IdempotencyKey!);
+        if (confirm.ShowDialog(new Win32Owner(SafeMainHwnd())) != DialogResult.OK)
+        {
+            return;
+        }
+        if (_connection.State != ConnectionState.Connected)
+        {
+            Error("Sign in to Arch PLM before resuming a Copy Design attempt.");
+            return;
+        }
+
+        ExecuteCopyDesignAttempt(reconstruction.Plan!, reconstruction.IdempotencyKey!, label: null, CopyDesignAttemptKind.Resume);
+    }
+
+    /// <summary>
+    /// P6D ROUND 3, item F: the deliberate, explicit, controlled RETRY of the
+    /// LAST Apply Copy Design attempt whose reservation call itself never
+    /// returned a trustworthy answer (<see cref="_uncertainCopyDesignAttempt"/>) -
+    /// reachable ONLY via its own dedicated ribbon command, NEVER offered or
+    /// triggered automatically. Replays the EXACT SAME plan and
+    /// idempotencyKey (never a fresh key - the idempotency key alone is the
+    /// recovery handle even though no operationId was ever confirmed): if the
+    /// server had already committed the reservation, the SAME operation is
+    /// returned; if not, it is safely created now. A normal Apply never
+    /// consumes this key (it always mints its own), so recovering never
+    /// collides with unrelated work.
+    /// </summary>
+    private void RunCopyDesignRecover()
+    {
+        if (_uncertainCopyDesignAttempt is not { } uncertain)
+        {
+            Info("There is no Copy Design attempt to recover in this session. Recover is only offered after an "
+                + "Apply Copy Design attempt's reservation call itself failed without a confirmed answer from the "
+                + "server (the outcome is genuinely unknown).");
+            return;
+        }
+
+        using var confirm = new CopyDesignRecoverConfirmDialog(uncertain.Plan, uncertain.IdempotencyKey);
+        if (confirm.ShowDialog(new Win32Owner(SafeMainHwnd())) != DialogResult.OK)
+        {
+            return;
+        }
+
+        if (_connection.State != ConnectionState.Connected)
+        {
+            Error("Sign in to Arch PLM before recovering a Copy Design attempt.");
+            return;
+        }
+
+        ExecuteCopyDesignAttempt(uncertain.Plan, uncertain.IdempotencyKey, uncertain.Label, CopyDesignAttemptKind.Recover);
+    }
+
+    /// <summary>Distinguishes the THREE ways <see cref="ExecuteCopyDesignAttempt"/>
+    ///  can be entered - purely for status text / dialog titles and for
+    ///  choosing which of <see cref="_resumableCopyDesignAttempt"/> /
+    ///  <see cref="_uncertainCopyDesignAttempt"/> the triggering command read
+    ///  from; the orchestration itself is IDENTICAL for all three (same
+    ///  idempotency-key-based safety).</summary>
+    private enum CopyDesignAttemptKind { Fresh, Resume, Recover }
+
+    /// <summary>Shared orchestration for a fresh Apply, an explicit Resume,
+    ///  and an explicit Recover - the ONLY difference between them is which
+    ///  <paramref name="idempotencyKey"/> is supplied (fresh vs. reused) and
+    ///  which confirmation dialog the caller already showed. Wires the REAL
+    ///  Inventor/HTTP adapters (including, since P6D ROUND 2/3, the
+    ///  operation-status client that makes RESUME/RECOVER safe for EVERY
+    ///  call - a fresh attempt's reservation has nothing materialized yet, so
+    ///  a well-formed status response naturally finds nothing to skip) and
+    ///  shows the result. Ends at READY FOR MANUAL INVENTOR TEST (or a clear
+    ///  failure/cleanup report) - it never auto-accepts or releases
+    ///  anything.</summary>
+    private void ExecuteCopyDesignAttempt(CopyDesignPlan plan, string idempotencyKey, string? label, CopyDesignAttemptKind kind)
+    {
         var orchestrator = new Core.CopyDesign.Apply.CopyDesignApplyOrchestrator(
             _copyDesignApplyGuard,
             new ApplyCopyDesignReservationAdapter(_connection),
-            new Inventor.CopyDesign.InventorCopyDesignPhysicalCopier(_application),
+            new Inventor.CopyDesign.InventorCopyDesignPhysicalCopier(_application, new Core.CopyDesign.Apply.CopyDesignFileHasher()),
             new Inventor.CopyDesign.InventorCopyDesignReferenceRewirer(_application),
             new Inventor.CopyDesign.InventorCopyDesignVerifier(_application, new Core.CopyDesign.Apply.CopyDesignFileHasher()),
             new MaterializeCopyDesignAdapter(_connection),
@@ -570,22 +962,96 @@ internal sealed class ArchAddInController : IDisposable
             // (worth the orchestrator's bounded, same-key, same-request
             // retry) versus a deterministic business/4xx rejection (never
             // retried) is here, where the real ArchApiException is visible.
-            isTransientReservationFailure: ex => ex is ArchApiException apiEx && apiEx.IsServerUnavailable);
+            isTransientReservationFailure: ex => ex is ArchApiException apiEx && apiEx.IsServerUnavailable,
+            maxReservationAttempts: 3,
+            // P6D: the SAME InventorApi.Application drives the drawing
+            // adapters too - the physical copier above already handles
+            // IDW/DWG (see its own doc comment), so only reference rewiring
+            // and verification need drawing-specific adapters (a drawing has
+            // no ComponentOccurrence - see InventorCopyDesignDrawingReferenceRewirer's
+            // doc comment for the exact API used instead).
+            drawingRewirer: new Inventor.CopyDesign.InventorCopyDesignDrawingReferenceRewirer(_application),
+            drawingVerifier: new Inventor.CopyDesign.InventorCopyDesignDrawingVerifier(_application, new Core.CopyDesign.Apply.CopyDesignFileHasher()),
+            // P6D ROUND 3: always wired, for BOTH a fresh apply and an
+            // explicit resume - a fresh reservation's targets have nothing
+            // materialized yet, so a well-formed status response finds
+            // nothing to skip and behavior is unaffected; it is the ONLY
+            // thing that lets a LATER resume of THIS attempt skip already-
+            // completed work. UNLIKE round 2's probe, a failure to obtain
+            // this status now FAILS CLOSED (see
+            // Core.CopyDesign.Apply.CopyDesignApplyOrchestrator's step 6b) -
+            // so an ordinary fresh apply is only ever affected by this if the
+            // status call itself fails immediately after a successful
+            // reservation (a genuine transport/auth problem worth surfacing,
+            // not silently swallowed).
+            operationStatusClient: new CopyDesignOperationStatusAdapter(_connection));
 
         Core.CopyDesign.Apply.CopyDesignApplyOperationResult? result = null;
         RunBackground(
-            async ct => result = await orchestrator.ExecuteAsync(plan, attempt.IdempotencyKey, label: null, ct),
-            "Applying Copy Design",
+            async ct => result = await orchestrator.ExecuteAsync(plan, idempotencyKey, label, ct),
+            kind switch
+            {
+                CopyDesignAttemptKind.Resume => "Resuming Copy Design",
+                CopyDesignAttemptKind.Recover => "Recovering Copy Design",
+                _ => "Applying Copy Design",
+            },
             onDone: () =>
             {
                 if (result is null)
                 {
                     return;
                 }
+
+                // P6D ROUND 3, item F: the SINGLE place BOTH recovery fields
+                // are ever written, so they stay mutually exclusive for the
+                // SAME attempt and are never left stale:
+                //   - a CONFIRMED reservation that did not fully materialize
+                //     -> resumable (operationId known, entry-level recovery);
+                //   - the reservation call itself never returned a
+                //     trustworthy answer -> uncertain (no operationId at
+                //     all, idempotency-key-only recovery);
+                //   - anything else (including full success, or a failure
+                //     BEFORE the reservation call was even attempted, which
+                //     has nothing to safely retry via replay) -> clears
+                //     whichever of the two applied to THIS attempt's prior
+                //     state, since a fresh outcome supersedes it.
+                if (result.ReservedButUnmaterialized)
+                {
+                    _resumableCopyDesignAttempt = (plan, idempotencyKey, label);
+                    _uncertainCopyDesignAttempt = null;
+                }
+                else if (result.Outcome == Core.CopyDesign.Apply.CopyDesignApplyOutcome.ReservationCallFailed)
+                {
+                    _uncertainCopyDesignAttempt = (plan, idempotencyKey, label);
+                    _resumableCopyDesignAttempt = null;
+                }
+                else
+                {
+                    _resumableCopyDesignAttempt = null;
+                    _uncertainCopyDesignAttempt = null;
+                }
+
                 var text = Core.CopyDesign.Apply.CopyDesignApplyResultTextReport.Render(result);
-                using var dialog = new ScanResultDialog($"{ArchAddInInfo.DisplayName} - Apply Copy Design ({result.Outcome})", text);
+                var verb = kind switch
+                {
+                    CopyDesignAttemptKind.Resume => "Resume Copy Design",
+                    CopyDesignAttemptKind.Recover => "Recover Copy Design",
+                    _ => "Apply Copy Design",
+                };
+                var title = $"{ArchAddInInfo.DisplayName} - {verb} ({result.Outcome})";
+                using var dialog = new ScanResultDialog(title, text);
                 dialog.ShowDialog(new Win32Owner(SafeMainHwnd()));
             },
+            // P6D fix: Resume/Recover enablement depends on
+            // _resumableCopyDesignAttempt / _uncertainCopyDesignAttempt,
+            // which onDone above just updated - without this, the ribbon
+            // keeps showing whatever it computed before this attempt ran
+            // (e.g. both disabled) until some UNRELATED event happens to
+            // trigger RefreshEnablement (a document change, a connection
+            // state change). onSettled runs in RunBackground's `finally`, so
+            // this refresh happens for every outcome - success, a thrown
+            // exception, or a timeout - never only the happy path.
+            onSettled: RefreshEnablement,
             timeout: TimeSpan.FromMinutes(30));
     }
 
@@ -607,6 +1073,18 @@ internal sealed class ArchAddInController : IDisposable
         public Task<Core.CopyDesign.Apply.CopyDesignMaterializationResult> MaterializeFirstFileVersionAsync(
             Core.CopyDesign.Apply.CopyDesignMaterializeRequest request, CancellationToken ct) =>
             connection.MaterializeFirstFileVersionAsync(request, ct);
+    }
+
+    /// <summary>P6D ROUND 3, HIGH fix (items D/E): thin adapter over
+    ///  <see cref="ArchConnectionManager.GetCopyDesignOperationStatusAsync"/> -
+    ///  the ONLY thing that lets the orchestrator's RESUME classification
+    ///  consult the authoritative per-operation status endpoint.</summary>
+    private sealed class CopyDesignOperationStatusAdapter(ArchConnectionManager connection)
+        : Core.CopyDesign.Apply.ICopyDesignOperationStatusClient
+    {
+        public Task<Core.CopyDesign.Apply.CopyDesignOperationStatusResult> GetStatusAsync(
+            Core.CopyDesign.Apply.CopyDesignOperationStatusExpectation expectation, CancellationToken ct) =>
+            connection.GetCopyDesignOperationStatusAsync(expectation, ct);
     }
 
     // ---- P5C: controlled reference repair --------------------------
@@ -1033,6 +1511,7 @@ internal sealed class ArchAddInController : IDisposable
     private void ShowGetLatestDialog()
     {
         string documentNumber;
+        string documentType;
         string workspaceRoot;
         using (var dialog = new GetLatestDialog())
         {
@@ -1041,12 +1520,13 @@ internal sealed class ArchAddInController : IDisposable
                 return;
             }
             documentNumber = dialog.RootDocumentNumber;
+            documentType = dialog.RootDocumentType;
             workspaceRoot = dialog.WorkspaceRoot;
         }
 
         var request = new GetLatestRequest
         {
-            Root = CadDocumentLookup.ByNumber(documentNumber),
+            Root = CadDocumentLookup.ByNumber(documentNumber: documentNumber, documentType: documentType),
             WorkspaceRoot = workspaceRoot,
         };
 

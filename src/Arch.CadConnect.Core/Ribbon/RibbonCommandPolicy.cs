@@ -21,7 +21,9 @@ public static class RibbonCommandPolicy
         ConnectionState connection,
         CadDocumentContext document,
         string? userRole = null,
-        bool hasRememberedUndoTarget = false)
+        bool hasRememberedUndoTarget = false,
+        bool hasResumableCopyDesignAttempt = false,
+        bool hasUncertainCopyDesignAttempt = false)
     {
         // Not built yet -> visible but disabled, everywhere.
         if (!command.IsImplemented())
@@ -94,6 +96,33 @@ public static class RibbonCommandPolicy
             ArchCommand.CopyDesignPreview => connection == ConnectionState.Connected
                 && IsScannableDocument(document),
 
+            // P6D ROUND 2/3 fix: these were UNCONDITIONALLY disabled before -
+            // this switch had no case for either command at all, so they
+            // silently fell through to `_ => false` regardless of whether an
+            // attempt was genuinely resumable/recoverable. Deliberately does
+            // NOT require an active document (see ArchCommand.RequiresActiveDocument's
+            // own comment - the remembered attempt carries its own plan) -
+            // only a live connection (Resume/Recover both replay an
+            // authenticated server request).
+            //
+            // P6D PRODUCTION RECOVERY: CopyDesignResume no longer requires
+            // hasResumableCopyDesignAttempt - a DURABLE resume (by known
+            // CopyDesignOperationId, reconstructed from the server's
+            // authoritative status - see CopyDesignResumeAttemptReconstructor)
+            // is now offered whenever connected, even with NO in-memory
+            // attempt (e.g. after an Inventor restart lost
+            // _resumableCopyDesignAttempt). The controller decides WHICH
+            // resume path to offer (in-session vs. durable-by-id) once the
+            // command is actually invoked - this policy only decides whether
+            // the button can do ANYTHING useful at all. CopyDesignRecover
+            // stays conditioned on hasUncertainCopyDesignAttempt - it has no
+            // durable-by-id equivalent (an uncertain reservation never
+            // confirmed an operationId to recover BY - see ArchCommand.CopyDesignRecover's
+            // own doc comment) and must never be conflated with durable resume.
+            ArchCommand.CopyDesignResume => connection == ConnectionState.Connected,
+            ArchCommand.CopyDesignRecover => connection == ConnectionState.Connected
+                && hasUncertainCopyDesignAttempt,
+
             _ => false,
         };
     }
@@ -116,12 +145,15 @@ public static class RibbonCommandPolicy
         ConnectionState connection,
         CadDocumentContext document,
         string? userRole = null,
-        bool hasRememberedUndoTarget = false)
+        bool hasRememberedUndoTarget = false,
+        bool hasResumableCopyDesignAttempt = false,
+        bool hasUncertainCopyDesignAttempt = false)
     {
         var map = new Dictionary<ArchCommand, bool>();
         foreach (var command in ArchCommands.All)
         {
-            map[command] = IsEnabled(command, connection, document, userRole, hasRememberedUndoTarget);
+            map[command] = IsEnabled(command, connection, document, userRole, hasRememberedUndoTarget,
+                hasResumableCopyDesignAttempt, hasUncertainCopyDesignAttempt);
         }
         return map;
     }

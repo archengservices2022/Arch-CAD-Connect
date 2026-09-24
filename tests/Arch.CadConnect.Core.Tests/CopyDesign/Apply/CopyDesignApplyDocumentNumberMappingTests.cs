@@ -242,16 +242,36 @@ public class CopyDesignApplyDocumentNumberMappingTests
     // ---- local, pre-HTTP fail-closed on an intra-request document-number
     //      collision (the "also inspect" follow-up) ------------------------
 
+    // P6D ROUND 2, HIGH fix: was previously rejected here (the server's OLD
+    // org-wide-unique-regardless-of-type documentNumber constraint made
+    // this a genuine collision). Now that the server scopes uniqueness by
+    // (documentNumber, documentType), two DIFFERENT document types sharing
+    // one destination stem are explicitly ALLOWED - see
+    // 20260921183016_scope_document_number_uniqueness_by_type in the web
+    // repo.
     [Fact]
-    public void An_IAM_and_an_IPT_sharing_the_same_destination_stem_in_different_paths_is_rejected_LOCALLY()
+    public void An_IAM_and_an_IPT_sharing_the_same_destination_stem_in_different_paths_is_ALLOWED()
     {
-        // Two DIFFERENT destination paths (different sub-folder AND
-        // extension) that would still collide on document number - never
-        // caught by CopyDesignPlanner's own duplicate-destination check
-        // (which compares full paths, extension included).
         var iam = CopyNode("cad-iam", @"C:\src\a.iam", @"C:\dst\one\FOO.iam", type: CadDocumentType.Iam);
         var ipt = CopyNode("cad-ipt", @"C:\src\b.ipt", @"C:\dst\two\FOO.ipt", type: CadDocumentType.Ipt);
         var plan = Plan(new[] { iam, ipt });
+
+        var result = CopyDesignApplyRequestMapper.Map(plan, "key-1", null);
+
+        Assert.True(result.Success);
+        Assert.Equal(2, result.Request!.Entries.Count);
+    }
+
+    [Fact]
+    public void Two_IAMs_sharing_the_same_destination_stem_in_different_paths_is_STILL_rejected_LOCALLY()
+    {
+        // Two DIFFERENT destination paths (different sub-folder, SAME
+        // extension/type) that would still collide on (document number,
+        // document type) - never caught by CopyDesignPlanner's own
+        // duplicate-destination check (which compares full paths).
+        var iamA = CopyNode("cad-iam-a", @"C:\src\a.iam", @"C:\dst\one\FOO.iam", type: CadDocumentType.Iam);
+        var iamB = CopyNode("cad-iam-b", @"C:\src\b.iam", @"C:\dst\two\FOO.iam", type: CadDocumentType.Iam);
+        var plan = Plan(new[] { iamA, iamB });
 
         var result = CopyDesignApplyRequestMapper.Map(plan, "key-1", null);
 

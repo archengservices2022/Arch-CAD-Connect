@@ -352,7 +352,7 @@ public sealed class HttpLatestVersionProbe : ILatestVersionProbe
                 continue;
             }
 
-            byId[id] = LatestVersionResult.Found(id, fvId, fileSize, r.Checksum!);
+            byId[id] = LatestVersionResult.Found(id, fvId, fileSize, r.Checksum!, versionNumber);
         }
 
         foreach (var id in ambiguous)

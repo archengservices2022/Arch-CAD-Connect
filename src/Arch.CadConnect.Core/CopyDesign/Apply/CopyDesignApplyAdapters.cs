@@ -37,7 +37,15 @@ public interface ICopyDesignPhysicalCopier
     ///  exact Inventor API used. Must NEVER mutate the source document.
     ///  Returns a failure result rather than throwing for any DOCUMENTED
     ///  Inventor failure; only genuinely unexpected exceptions propagate.</summary>
-    Task<CopyDesignPhysicalCopyResult> CopyAsync(CopyDesignNode node, CancellationToken ct);
+    /// <param name="sourceSha256BeforeOperation">The SAME per-node baseline
+    ///  <see cref="CopyDesignApplyOrchestrator"/> already captures BEFORE
+    ///  any mutation (and already threads into <see cref="ICopyDesignVerifier.GatherFactsAsync"/>) -
+    ///  see <see cref="CopyDesignSourceDirtyProvenanceGuard"/> for why a
+    ///  physical copier needs it too: to distinguish a document it opened
+    ///  itself coming back Dirty as Inventor's own load-time side effect
+    ///  from a genuine pre-existing unsaved edit, without weakening the
+    ///  Dirty check for the latter.</param>
+    Task<CopyDesignPhysicalCopyResult> CopyAsync(CopyDesignNode node, string sourceSha256BeforeOperation, CancellationToken ct);
 }
 
 public sealed record CopyDesignRewireResult(bool Success, string? FailureReason);

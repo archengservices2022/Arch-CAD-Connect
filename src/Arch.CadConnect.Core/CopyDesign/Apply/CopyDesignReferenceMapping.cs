@@ -52,8 +52,19 @@ public sealed record CopyDesignReferenceMappingResult(bool Success, string? Fail
 /// </summary>
 public static class CopyDesignReferenceTargetResolver
 {
+    /// <summary>P6D: <paramref name="relationshipKind"/> selects which edge
+    ///  kind out of <paramref name="parent"/> this resolves - defaults to
+    ///  <see cref="CadRelationshipKind.Component"/> (P6C's IAM/IPT-only
+    ///  usage, unchanged) so every existing caller/test keeps working
+    ///  unmodified. P6D passes <see cref="CadRelationshipKind.DrawingModel"/>
+    ///  to resolve a copied drawing's model targets instead - the same
+    ///  fail-closed logic below (Exclude/NeedsDecision child, unresolved/
+    ///  unsafe disposition, missing destination, conflicting expected
+    ///  targets) applies identically to either kind; only the edge FILTER
+    ///  changes.</summary>
     public static CopyDesignReferenceMappingResult Resolve(
-        CopyDesignNode parent, IReadOnlyList<CopyDesignEdge> allEdges, IReadOnlyList<CopyDesignNode> allNodes)
+        CopyDesignNode parent, IReadOnlyList<CopyDesignEdge> allEdges, IReadOnlyList<CopyDesignNode> allNodes,
+        CadRelationshipKind relationshipKind = CadRelationshipKind.Component)
     {
         ArgumentNullException.ThrowIfNull(parent);
         ArgumentNullException.ThrowIfNull(allEdges);
@@ -66,7 +77,7 @@ public static class CopyDesignReferenceTargetResolver
         }
 
         var childEdges = allEdges
-            .Where(e => e.RelationshipKind == CadRelationshipKind.Component
+            .Where(e => e.RelationshipKind == relationshipKind
                         && string.Equals(e.ParentAbsolutePath, parent.SourceAbsolutePath, StringComparison.OrdinalIgnoreCase))
             .ToArray();
 

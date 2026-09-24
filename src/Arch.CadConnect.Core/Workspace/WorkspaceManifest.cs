@@ -220,6 +220,40 @@ public sealed class WorkspaceManifest
         return null;
     }
 
+    /// <summary>The manifest entry AND its resolved absolute path, if any,
+    ///  for a STABLE <paramref name="cadDocumentId"/> bound in this
+    ///  workspace. P6D: lets a real drawing-association source enrich an
+    ///  authoritative (server-confirmed) drawing with the LOCAL absolute
+    ///  path it already sits at, when a prior Get Latest already
+    ///  materialized it - never the reverse (this is never used to prove
+    ///  the association itself; the server's DRAWING_REFERENCE row already
+    ///  did that). No match (not yet fetched into this workspace) returns
+    ///  <c>null</c> - a legitimate "claimed but unresolved" state, never a
+    ///  guess.</summary>
+    public (WorkspaceManifestEntry Entry, string AbsolutePath)? FindByCadDocumentId(string cadDocumentId)
+    {
+        if (string.IsNullOrWhiteSpace(cadDocumentId))
+        {
+            return null;
+        }
+        foreach (var entry in _doc.Entries)
+        {
+            if (!string.Equals(entry.CadDocumentId, cadDocumentId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+            try
+            {
+                return (entry, SafeWorkspacePath.ResolveWithinRoot(_root, entry.RelativePath));
+            }
+            catch (Exception ex) when (ex is UnsafeWorkspacePathException or WorkspaceRootException)
+            {
+                return null;
+            }
+        }
+        return null;
+    }
+
     // ---- P4C: checkout state (all mutate the matching entry ONLY, then
     //      persist atomically; never create an entry - identity must come
     //      from a prior Get Latest). Matched by exact absolute path, never by

@@ -53,11 +53,19 @@ public enum LatestVersionOutcome
 /// when the server did not supply usable integrity metadata; a P5C repair then
 /// fails closed. <see cref="HasCanonicalIntegrity"/> is the single predicate.
 /// </summary>
+/// <param name="VersionNumber">P6D ROUND 2: the server-authoritative version
+///  number of <see cref="LatestFileVersionId"/> - <c>0</c> means "not
+///  provided/unknown" (never a real version number, which is always &gt;= 1).
+///  Added for Copy Design RESUME (<see cref="Apply.CopyDesignApplyOrchestrator"/>),
+///  which must fail closed rather than resume a target whose latest version
+///  is anything other than exactly 1 - a genuinely NEW field, additive only;
+///  P5B-B's own reference-health classification never reads it.</param>
 public sealed record AuthoritativeLatestVersion(
     string CadDocumentId,
     string LatestFileVersionId,
     long FileSize = -1,
-    string Sha256 = "")
+    string Sha256 = "",
+    int VersionNumber = 0)
 {
     /// <summary>True only when both the server byte size (&gt;= 0, safe range)
     ///  and the server checksum (exactly 64 lowercase hex, no prefix, no
@@ -120,9 +128,9 @@ public sealed record LatestVersionResult(
     /// than trusting the mutable local manifest.
     /// </summary>
     public static LatestVersionResult Found(
-        string cadDocumentId, string latestFileVersionId, long fileSize = -1, string sha256 = "") =>
+        string cadDocumentId, string latestFileVersionId, long fileSize = -1, string sha256 = "", int versionNumber = 0) =>
         new(cadDocumentId, LatestVersionOutcome.Found,
-            new AuthoritativeLatestVersion(cadDocumentId, latestFileVersionId, fileSize, sha256));
+            new AuthoritativeLatestVersion(cadDocumentId, latestFileVersionId, fileSize, sha256, versionNumber));
 
     public static LatestVersionResult Failure(string cadDocumentId, LatestVersionOutcome outcome) =>
         new(cadDocumentId, outcome == LatestVersionOutcome.Found ? LatestVersionOutcome.MalformedResponse : outcome, null);

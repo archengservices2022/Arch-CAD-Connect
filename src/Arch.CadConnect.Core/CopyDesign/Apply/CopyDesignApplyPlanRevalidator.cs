@@ -28,6 +28,23 @@ public sealed record CopyDesignRevalidationResult(bool Success, string? FailureR
 ///
 /// PURE with respect to the probes themselves (which are injected) - this
 /// class does no I/O or COM of its own.
+///
+/// P6D ROUND 2 (RESUME) split: <see cref="Revalidate"/>'s single combined
+/// pass is now built from two independently-callable pieces -
+/// <see cref="RevalidateSourceAndStructure"/> (duplicate-within-request,
+/// self-overwrite, source-still-exists - NONE of these are sensitive to
+/// RESUME state, so <see cref="CopyDesignApplyOrchestrator"/> still calls
+/// this EARLY, before the reservation call, exactly as the combined
+/// <see cref="Revalidate"/> always has) and
+/// <see cref="RevalidateDestinationsFree"/> (the destination-must-not-exist
+/// check ONLY - the ONE check RESUME needs to skip for an entry it already
+/// proved is a genuinely already-materialized target, via
+/// <paramref name="skipForCadDocumentIds"/> - the same
+/// <c>ICopyDesignMaterializationStatusProbe</c> and integrity-verified
+/// destination the RESUME classification step already confirmed). This
+/// split changes NOTHING about <see cref="Revalidate"/>'s own combined
+/// behavior/contract - it simply calls both pieces internally, in the SAME
+/// order, with no skip set - so every EXISTING caller/test is unaffected.
 /// </summary>
 public static class CopyDesignApplyPlanRevalidator
 {
@@ -36,9 +53,25 @@ public static class CopyDesignApplyPlanRevalidator
         Func<string, bool> sourceExists,
         Func<string, bool> destinationExists)
     {
+        var structural = RevalidateSourceAndStructure(request, sourceExists);
+        if (!structural.Success)
+        {
+            return structural;
+        }
+        return RevalidateDestinationsFree(request, destinationExists);
+    }
+
+    /// <summary>The RESUME-agnostic half: duplicate destination within THIS
+    ///  request, self-overwrite (source == proposed destination), and
+    ///  "source still exists". Safe to call BEFORE the reservation call -
+    ///  none of these facts can legitimately change based on whether an
+    ///  entry turns out to already be materialized from a prior attempt.</summary>
+    public static CopyDesignRevalidationResult RevalidateSourceAndStructure(
+        CopyDesignApplyRequest request,
+        Func<string, bool> sourceExists)
+    {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(sourceExists);
-        ArgumentNullException.ThrowIfNull(destinationExists);
 
         var copyEntries = request.Entries.Where(e => e.Entry.Action == CopyDesignApplyEntryAction.Copy).ToArray();
 
@@ -83,7 +116,38 @@ public static class CopyDesignApplyPlanRevalidator
                 return CopyDesignRevalidationResult.Fail(
                     $"The source \"{entry.Node.SourceFileName}\" no longer exists at its expected path - refusing to execute.");
             }
+        }
 
+        return CopyDesignRevalidationResult.Ok;
+    }
+
+    /// <summary>The RESUME-sensitive half: "destination must not already
+    ///  exist" - the ONE fact a genuinely already-materialized entry
+    ///  (proved by <see cref="CopyDesignApplyOrchestrator"/>'s own RESUME
+    ///  classification, via <see cref="ICopyDesignMaterializationStatusProbe"/>)
+    ///  is EXPECTED to fail, by design. <paramref name="skipForCadDocumentIds"/>
+    ///  (keyed by the entry's SOURCE <c>CadDocumentId</c>, matching every
+    ///  other RESUME-keyed structure in the orchestrator) exempts exactly
+    ///  those entries - never any other. Omitting it (the default) checks
+    ///  every COPY entry, unconditionally, exactly like the ORIGINAL combined
+    ///  <see cref="Revalidate"/> always has.</summary>
+    public static CopyDesignRevalidationResult RevalidateDestinationsFree(
+        CopyDesignApplyRequest request,
+        Func<string, bool> destinationExists,
+        IReadOnlySet<string>? skipForCadDocumentIds = null)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(destinationExists);
+
+        var copyEntries = request.Entries.Where(e => e.Entry.Action == CopyDesignApplyEntryAction.Copy);
+        foreach (var entry in copyEntries)
+        {
+            if (skipForCadDocumentIds is not null && entry.Node.CadDocumentId is { } id && skipForCadDocumentIds.Contains(id))
+            {
+                continue;
+            }
+
+            var destination = entry.Node.ProposedDestinationAbsolutePath!;
             bool destinationAlreadyExists;
             try
             {

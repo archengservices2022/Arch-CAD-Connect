@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using System.Linq;
 
 using Arch.CadConnect.Core.Session;
 using Arch.CadConnect.Core.Workspace;
@@ -107,8 +108,9 @@ public sealed class GetLatestOrchestrator
         TimeSpan timeout,
         CancellationToken ct)
     {
-        var url = server.ResolvePath(
-            $"/api/desktop/cad-documents/resolve?{lookup.QueryParameter}={Uri.EscapeDataString(lookup.Value)}");
+        var query = string.Join('&', lookup.BuildQueryParameters()
+            .Select(p => $"{p.Name}={Uri.EscapeDataString(p.Value)}"));
+        var url = server.ResolvePath($"/api/desktop/cad-documents/resolve?{query}");
         if (!server.MatchesOrigin(url))
         {
             throw new ArchApiException(ArchApiFailureKind.BadRequest, "Refusing to resolve against a different server.");
