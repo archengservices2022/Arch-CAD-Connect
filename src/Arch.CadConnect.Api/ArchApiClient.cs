@@ -246,6 +246,14 @@ public sealed class ArchApiClient : IArchApi
             .GetRawStatusAsync(session, operationId, ct);
     }
 
+    public Task<Core.CopyDesign.Apply.CopyDesignVerificationSupportResult> GetCopyDesignVerificationSupportAsync(
+        IArchSession session, string operationId, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        return new CopyDesign.HttpCopyDesignVerificationSupportClient(Server, _http, _options.Timeout)
+            .GetVerificationSupportAsync(session, operationId, ct);
+    }
+
     private CheckoutOrchestrator Orchestrator(IArchSession session) =>
         new(Server, session, _http, _options.Timeout, clock: null, editorProbe: _options.EditorProbe);
 

@@ -344,6 +344,50 @@ public sealed class ArchConnectionManager
     }
 
     /// <summary>
+    /// P6E-C: the RAW, structurally-validated verification-support payload
+    /// for ONE Copy Design operation, by id alone, for the current session -
+    /// see <see cref="Core.CopyDesign.Apply.ICopyDesignVerificationSupportClient"/>'s
+    /// own doc comment. READ-ONLY. Never throws - a missing session or any
+    /// transport/auth/contract failure resolves to a non-Found outcome.
+    /// </summary>
+    public async Task<Core.CopyDesign.Apply.CopyDesignVerificationSupportResult> GetCopyDesignVerificationSupportAsync(
+        string operationId, CancellationToken ct = default)
+    {
+        var session = CurrentSession;
+        if (session is null)
+        {
+            return new Core.CopyDesign.Apply.CopyDesignVerificationSupportResult(
+                Core.CopyDesign.Apply.CopyDesignVerificationSupportOutcome.AuthenticationFailed);
+        }
+
+        Core.CopyDesign.Apply.CopyDesignVerificationSupportResult result;
+        try
+        {
+            result = await _apiFactory(session.Server)
+                .GetCopyDesignVerificationSupportAsync(session, operationId, ct)
+                .ConfigureAwait(false);
+        }
+        catch (ArchApiException ex)
+        {
+            if (ex.IsAuthFailure)
+            {
+                InvalidateRejectedSession();
+                return new Core.CopyDesign.Apply.CopyDesignVerificationSupportResult(
+                    Core.CopyDesign.Apply.CopyDesignVerificationSupportOutcome.AuthenticationFailed);
+            }
+            return new Core.CopyDesign.Apply.CopyDesignVerificationSupportResult(
+                Core.CopyDesign.Apply.CopyDesignVerificationSupportOutcome.ServerUnavailable);
+        }
+
+        if (result.Outcome == Core.CopyDesign.Apply.CopyDesignVerificationSupportOutcome.AuthenticationFailed)
+        {
+            InvalidateRejectedSession();
+        }
+
+        return result;
+    }
+
+    /// <summary>
     /// P5B-B: fetch the AUTHORITATIVE latest FileVersion identity for each of
     /// <paramref name="cadDocumentIds"/> for the current session. READ-ONLY.
     /// Never throws for transport / auth / unknown-id failures - they are

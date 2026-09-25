@@ -123,6 +123,15 @@ public static class RibbonCommandPolicy
             ArchCommand.CopyDesignRecover => connection == ConnectionState.Connected
                 && hasUncertainCopyDesignAttempt,
 
+            // P6E-D: read-only re-verification of an EXISTING operation, by an
+            // operationId the user types into its own dialog (never inferred
+            // from the active document) - so, like GetLatest, it needs only a
+            // live connection, no active-document gate, and no remembered-
+            // attempt flag (unlike Resume/Recover, Verify never depends on
+            // this session's own in-memory attempt history). Not role-gated:
+            // it is read-only, so a VIEWER may verify too.
+            ArchCommand.CopyDesignVerify => connection == ConnectionState.Connected,
+
             _ => false,
         };
     }

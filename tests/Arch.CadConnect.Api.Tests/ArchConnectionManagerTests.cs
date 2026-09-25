@@ -101,6 +101,17 @@ public class ArchConnectionManagerTests
                 ?? new Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignDurableResumeStatusResult(
                     Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignDurableResumeStatusOutcome.NotFound));
         }
+
+        public string? LastVerificationSupportOperationId { get; private set; }
+        public Func<Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignVerificationSupportResult>? OnGetCopyDesignVerificationSupport { get; set; }
+        public Task<Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignVerificationSupportResult> GetCopyDesignVerificationSupportAsync(
+            IArchSession s, string operationId, CancellationToken ct = default)
+        {
+            LastVerificationSupportOperationId = operationId;
+            return Task.FromResult(OnGetCopyDesignVerificationSupport?.Invoke()
+                ?? new Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignVerificationSupportResult(
+                    Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignVerificationSupportOutcome.NotFound));
+        }
     }
 
     private static IArchSession Session(DateTimeOffset? expires = null) => new DesktopSession(
@@ -405,6 +416,67 @@ public class ArchConnectionManagerTests
             Arch.CadConnect.Core.CopyDesign.DrawingAssociationOutcome.Found,
             result["cad_root_iam"].Outcome);
         Assert.Equal("cad_root_idw", result["cad_root_iam"].Drawings.Single().CadDocumentId);
+    }
+
+    // ---- P6E-C verification-support forwarding --------------------------
+
+    [Fact]
+    public async Task GetCopyDesignVerificationSupport_without_a_session_fails_closed_to_AuthenticationFailed_never_calls_the_api()
+    {
+        FakeApi? api = null;
+        var mgr = new ArchConnectionManager(s => api = new FakeApi(s), new InMemorySessionStore());
+
+        var result = await mgr.GetCopyDesignVerificationSupportAsync("op-1");
+
+        Assert.Equal(
+            Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignVerificationSupportOutcome.AuthenticationFailed,
+            result.Outcome);
+        Assert.Null(api);
+    }
+
+    [Fact]
+    public async Task GetCopyDesignVerificationSupport_with_a_session_delegates_the_EXACT_operationId_to_the_api()
+    {
+        var store = new InMemorySessionStore();
+        FakeApi api = null!;
+        var mgr = new ArchConnectionManager(server => api = new FakeApi(server)
+        {
+            OnSignIn = () => Session(),
+            OnGetCopyDesignVerificationSupport = () => new Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignVerificationSupportResult(
+                Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignVerificationSupportOutcome.Found,
+                "op-42", "key-1",
+                Array.Empty<Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignDurableResumeEntry>(),
+                Array.Empty<Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignSourceIntegrityEvidence>(),
+                Array.Empty<Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignComponentEdge>()),
+        }, store);
+        await mgr.SignInAsync("https://plm.example.com", "t@o.com", "pw");
+
+        var result = await mgr.GetCopyDesignVerificationSupportAsync("op-42");
+
+        Assert.Equal("op-42", api.LastVerificationSupportOperationId);
+        Assert.True(result.Success);
+        Assert.Equal("op-42", result.OperationId);
+    }
+
+    [Fact]
+    public async Task GetCopyDesignVerificationSupport_an_authoritative_auth_rejection_invalidates_the_session()
+    {
+        var store = new InMemorySessionStore();
+        FakeApi api = null!;
+        var mgr = new ArchConnectionManager(server => api = new FakeApi(server)
+        {
+            OnSignIn = () => Session(),
+            OnGetCopyDesignVerificationSupport = () => new Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignVerificationSupportResult(
+                Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignVerificationSupportOutcome.AuthenticationFailed),
+        }, store);
+        await mgr.SignInAsync("https://plm.example.com", "t@o.com", "pw");
+
+        var result = await mgr.GetCopyDesignVerificationSupportAsync("op-1");
+
+        Assert.Equal(
+            Arch.CadConnect.Core.CopyDesign.Apply.CopyDesignVerificationSupportOutcome.AuthenticationFailed,
+            result.Outcome);
+        Assert.Null(store.TryLoad());
     }
 
     private async Task<(ArchConnectionManager Mgr, InMemorySessionStore Store)> ConnectedManager(

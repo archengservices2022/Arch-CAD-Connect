@@ -203,6 +203,19 @@ public interface IArchApi
     Task<Core.CopyDesign.Apply.CopyDesignDurableResumeStatusResult> GetDurableCopyDesignOperationStatusAsync(
         IArchSession session, string operationId, CancellationToken ct = default);
 
+    /// <summary>
+    /// P6E-C: the RAW, structurally-validated verification-support payload
+    /// for ONE Copy Design operation - source FileVersion integrity evidence
+    /// plus the operation's own COMPONENT topology - via the dedicated
+    /// <see cref="CopyDesign.HttpCopyDesignVerificationSupportClient"/>. See
+    /// <see cref="Core.CopyDesign.Apply.ICopyDesignVerificationSupportClient"/>'s
+    /// own doc comment for why this is a separate, additive client. Never
+    /// throws for a transport/auth/contract failure - reported via the
+    /// result's Outcome instead.
+    /// </summary>
+    Task<Core.CopyDesign.Apply.CopyDesignVerificationSupportResult> GetCopyDesignVerificationSupportAsync(
+        IArchSession session, string operationId, CancellationToken ct = default);
+
     // ---- future scope (declared, not implemented) ---------------------
 
     Task<PlmDocumentStatusDto> GetDocumentStatusAsync(IArchSession session, string cadDocumentId, CancellationToken ct = default);

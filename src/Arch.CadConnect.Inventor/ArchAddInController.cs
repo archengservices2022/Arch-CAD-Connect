@@ -234,6 +234,10 @@ internal sealed class ArchAddInController : IDisposable
                 RunCopyDesignRecover();
                 break;
 
+            case ArchCommand.CopyDesignVerify:
+                RunCopyDesignVerify();
+                break;
+
             default:
                 // Never fake a PDM result. Say plainly it is not built yet.
                 Info($"'{command.DisplayName()}' is not available yet. Coming in a later release.");
@@ -885,6 +889,235 @@ internal sealed class ArchAddInController : IDisposable
         }
 
         ExecuteCopyDesignAttempt(reconstruction.Plan!, reconstruction.IdempotencyKey!, label: null, CopyDesignAttemptKind.Resume);
+    }
+
+    // ---- P6E-D: Verify Copy Design (independent, read-only) -------------
+
+    /// <summary>
+    /// P6E-D: "Verify Copy Design" - an INDEPENDENT, READ-ONLY re-verification
+    /// of an EXISTING Copy Design operation, by operationId. No copy, no
+    /// rewire, no save, no materialize, no repair, no reservation, no
+    /// release/lifecycle action - this method (and its two continuations)
+    /// never constructs or calls <c>InventorCopyDesignPhysicalCopier</c>,
+    /// <c>InventorCopyDesignReferenceRewirer</c>,
+    /// <c>InventorCopyDesignDrawingReferenceRewirer</c>, any Copy Design
+    /// materialization client, or any Apply/Resume/Recover/lifecycle method.
+    ///
+    /// Staged flow, mirroring <see cref="RunDurableCopyDesignResume"/>'s own
+    /// proven 3-step shape (dialog -> verification-support lookup -> drawing
+    /// association authority -> build + verify):
+    ///   1. Validate dialog input (the dialog itself already fails closed on
+    ///      a blank id or a folder that does not exist).
+    ///   2. Load the source workspace manifest (local, synchronous, read-only).
+    ///   3. Fetch the P6E-A/P6E-C verification-support data for operationId.
+    ///   4. Fetch drawing associations via the EXISTING P6D authority.
+    ///   5. Build the P6E-B verification topology.
+    ///   6. If it cannot be safely built: show an INCOMPLETE result - zero
+    ///      COM verification (the orchestrator/verifiers are never even
+    ///      constructed on this path).
+    ///   7. Otherwise construct the UNMODIFIED <c>InventorCopyDesignVerifier</c>/
+    ///      <c>InventorCopyDesignDrawingVerifier</c> and run
+    ///      <see cref="Core.CopyDesign.Apply.CopyDesignVerificationOrchestrator.VerifyAsync"/>.
+    ///   8/9. Aggregate + display the report.
+    /// </summary>
+    private void RunCopyDesignVerify()
+    {
+        if (_connection.State != ConnectionState.Connected)
+        {
+            Error("Sign in to Arch PLM before verifying a Copy Design operation.");
+            return;
+        }
+
+        using var input = new CopyDesignVerifyDialog();
+        if (input.ShowDialog(new Win32Owner(SafeMainHwnd())) != DialogResult.OK)
+        {
+            return;
+        }
+
+        // Load the SOURCE workspace manifest up front - local, synchronous,
+        // read-only I/O - so an obviously wrong folder fails fast, before any
+        // network call at all. The dialog already proved the folder exists;
+        // this proves it holds a recognized managed workspace.
+        WorkspaceManifest sourceManifest;
+        try
+        {
+            sourceManifest = WorkspaceManifest.LoadOrEmpty(input.SourceWorkspaceRoot);
+        }
+        catch (Exception ex) when (ex is IOException or WorkspaceRootException or UnauthorizedAccessException)
+        {
+            Error($"Could not read the source workspace folder: {ex.Message}");
+            return;
+        }
+        if (sourceManifest.Entries.Count == 0)
+        {
+            Error("The source workspace folder has no recognized managed workspace manifest "
+                + "(.arch\\workspace.json) - choose the folder Get Latest originally materialized these "
+                + "documents into.");
+            return;
+        }
+
+        var operationId = input.OperationId;
+        var destinationFolder = input.DestinationFolder;
+
+        Core.CopyDesign.Apply.CopyDesignVerificationSupportResult? support = null;
+        RunBackground(
+            async ct => support = await _connection.GetCopyDesignVerificationSupportAsync(operationId, ct),
+            "Looking up Copy Design operation",
+            onDone: () => ContinueCopyDesignVerify(support, sourceManifest, destinationFolder),
+            timeout: TimeSpan.FromSeconds(60));
+    }
+
+    /// <summary>Second step: the operation's authoritative verification-
+    ///  support data is now known - fetch the AUTHORITATIVE drawing
+    ///  dependency mapping (the SAME drawing-association authority the P6D
+    ///  live-blocker fix already uses - no second HTTP client) for whichever
+    ///  model entries this operation actually reserved, so a drawing's
+    ///  expected reference set is never guessed from a file name.</summary>
+    private void ContinueCopyDesignVerify(
+        Core.CopyDesign.Apply.CopyDesignVerificationSupportResult? support,
+        WorkspaceManifest sourceManifest,
+        string destinationFolder)
+    {
+        if (support is null || !support.Success)
+        {
+            Error("Could not obtain the authoritative verification-support data for this Copy Design operation "
+                + $"({support?.Outcome.ToString() ?? "unknown"}) - nothing was verified. Confirm the operation id and "
+                + "try again.");
+            return;
+        }
+
+        var modelSourceIds = (support.Entries ?? Array.Empty<Core.CopyDesign.Apply.CopyDesignDurableResumeEntry>())
+            .Where(e => e.Action == "COPY" && e.SourceCadDocumentId is not null && e.OriginalDocumentType is "IAM" or "IPT")
+            .Select(e => e.SourceCadDocumentId!)
+            .Distinct()
+            .ToArray();
+
+        IReadOnlyDictionary<string, Core.CopyDesign.DrawingAssociationResult>? associations = null;
+        RunBackground(
+            async ct => associations = modelSourceIds.Length == 0
+                ? new Dictionary<string, Core.CopyDesign.DrawingAssociationResult>()
+                : await _connection.GetDrawingAssociationsAsync(modelSourceIds, sourceManifest, ct),
+            "Checking drawing associations",
+            onDone: () => FinishCopyDesignVerify(support, sourceManifest, destinationFolder, associations),
+            timeout: TimeSpan.FromSeconds(60));
+    }
+
+    /// <summary>Final step: build the expected P6E-B verification topology
+    ///  from durable data - if that structurally fails, show INCOMPLETE with
+    ///  ZERO COM verification (the verifiers below are never constructed on
+    ///  this path); otherwise construct the UNMODIFIED, read-only Inventor
+    ///  verifiers and run the real independent re-verification.</summary>
+    private void FinishCopyDesignVerify(
+        Core.CopyDesign.Apply.CopyDesignVerificationSupportResult support,
+        WorkspaceManifest sourceManifest,
+        string destinationFolder,
+        IReadOnlyDictionary<string, Core.CopyDesign.DrawingAssociationResult>? associations)
+    {
+        var operationModelSourceIds = new HashSet<string>(
+            (support.Entries ?? Array.Empty<Core.CopyDesign.Apply.CopyDesignDurableResumeEntry>())
+                .Where(e => e.Action == "COPY" && e.SourceCadDocumentId is not null && e.OriginalDocumentType is "IAM" or "IPT")
+                .Select(e => e.SourceCadDocumentId!));
+
+        // Invert "model -> its drawings" (what the authority answers) into
+        // "drawing's own source identity -> the models (from THIS operation
+        // only) it depends on" - what CopyDesignVerificationTopologyBuilder
+        // needs. Preserves the authority distinction: a model the authority
+        // never answered for (or answered NotAvailable/Unrecognized) simply
+        // never contributes a key here - MISSING is never treated as
+        // "authoritatively zero" (see CopyDesignVerificationTopologyBuilder.Build's
+        // own "empty vs unknown" doc comment) - it surfaces downstream as a
+        // Required NotProvable check -> INCOMPLETE for that drawing entry,
+        // never inferred from a filename.
+        var dependencies = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        if (associations is not null)
+        {
+            foreach (var (modelSourceId, associationResult) in associations)
+            {
+                if (associationResult.Outcome != Core.CopyDesign.DrawingAssociationOutcome.Found
+                    || !operationModelSourceIds.Contains(modelSourceId))
+                {
+                    continue;
+                }
+                foreach (var drawing in associationResult.Drawings)
+                {
+                    if (drawing.CadDocumentId is null)
+                    {
+                        continue;
+                    }
+                    if (!dependencies.TryGetValue(drawing.CadDocumentId, out var set))
+                    {
+                        set = new HashSet<string>(StringComparer.Ordinal);
+                        dependencies[drawing.CadDocumentId] = set;
+                    }
+                    set.Add(modelSourceId);
+                }
+            }
+        }
+        var modelSourceIdsByDrawingSourceId = dependencies.ToDictionary(
+            kv => kv.Key, kv => (IReadOnlySet<string>)kv.Value, StringComparer.Ordinal);
+
+        // Step 5/6: build the topology FIRST, as its own explicit step - ONLY
+        // to guarantee zero COM CONSTRUCTION (neither Inventor verifier nor
+        // the orchestrator is ever instantiated on this path) when it cannot
+        // be safely built - never to reinterpret the outcome. The result
+        // itself is built through the SAME shared Core factory
+        // (CopyDesignOperationVerificationResult.StructuralFailure) the
+        // orchestrator's own internal fallback uses, so the semantic
+        // (INCOMPLETE - "verification cannot legitimately conclude", never
+        // "proven wrong") comes from Core alone, never a separately invented
+        // UI-only interpretation.
+        var topology = Core.CopyDesign.Apply.CopyDesignVerificationTopologyBuilder.Build(
+            support, sourceManifest, destinationFolder, modelSourceIdsByDrawingSourceId);
+        if (!topology.Success)
+        {
+            var incompleteResult = Core.CopyDesign.Apply.CopyDesignOperationVerificationResult.StructuralFailure(
+                topology.FailureReason!, support.OperationId);
+            var incompleteText = Core.CopyDesign.Apply.CopyDesignVerificationResultTextReport.Render(incompleteResult);
+            var incompleteTitle = $"{ArchAddInInfo.DisplayName} - Verify Copy Design ({incompleteResult.Outcome})";
+            using var incompleteDialog = new CopyDesignVerificationResultDialog(incompleteTitle, incompleteText);
+            incompleteDialog.ShowDialog(new Win32Owner(SafeMainHwnd()));
+            return;
+        }
+
+        // Step 7: the SAME UNMODIFIED, read-only Inventor verifiers P6D's own
+        // mutating apply orchestrator already uses for its own verification
+        // step (see ExecuteCopyDesignAttempt) - GatherFactsAsync is their
+        // ONLY public entry point; neither has a Save/SaveAs/ReplaceReference
+        // call anywhere in its body (each opens OpenVisible:false, under
+        // SilentOperation, and always closes with SkipSave:true in a
+        // finally). No mutation adapter (copier/rewirer/materializer/
+        // reservation client) is constructed anywhere in this flow.
+        var verifier = new Inventor.CopyDesign.InventorCopyDesignVerifier(_application, new Core.CopyDesign.Apply.CopyDesignFileHasher());
+        var drawingVerifier = new Inventor.CopyDesign.InventorCopyDesignDrawingVerifier(_application, new Core.CopyDesign.Apply.CopyDesignFileHasher());
+        var orchestrator = new Core.CopyDesign.Apply.CopyDesignVerificationOrchestrator(
+            verifier,
+            new Core.CopyDesign.Apply.CopyDesignFileHasher(),
+            localFileExists: File.Exists,
+            drawingVerifier: drawingVerifier);
+
+        Core.CopyDesign.Apply.CopyDesignOperationVerificationResult? result = null;
+        RunBackground(
+            async ct => result = await orchestrator.VerifyAsync(support, sourceManifest, destinationFolder, modelSourceIdsByDrawingSourceId, ct),
+            "Verifying Copy Design",
+            onDone: () =>
+            {
+                if (result is null)
+                {
+                    return;
+                }
+                var text = Core.CopyDesign.Apply.CopyDesignVerificationResultTextReport.Render(result);
+                var title = $"{ArchAddInInfo.DisplayName} - Verify Copy Design ({result.Outcome})";
+                using var dialog = new CopyDesignVerificationResultDialog(title, text);
+                dialog.ShowDialog(new Win32Owner(SafeMainHwnd()));
+            },
+            // Verification opens/hashes every COPY/REUSE entry's document in
+            // turn (potentially many, each a real Inventor open) - a longer
+            // bound than the metadata-only lookups above, but still a fixed
+            // timeout, exactly like ExecuteCopyDesignAttempt's own bound for
+            // the mutating path. A timeout here reports plainly via
+            // RunBackground's existing OperationCanceledException handling -
+            // never a fabricated VERIFIED/FAILED/INCOMPLETE outcome.
+            timeout: TimeSpan.FromMinutes(15));
     }
 
     /// <summary>

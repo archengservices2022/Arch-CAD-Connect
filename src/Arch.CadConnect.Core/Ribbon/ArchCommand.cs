@@ -29,6 +29,7 @@ public enum ArchCommand
     CopyDesignPreview, // P6A - read-only plan + preview only, zero mutation
     CopyDesignResume, // P6D ROUND 2 - deliberate, explicit retry of the LAST partially-failed Apply Copy Design attempt
     CopyDesignRecover, // P6D ROUND 3 - deliberate, explicit retry of the LAST Apply Copy Design attempt whose reservation call itself never returned an answer (UNCERTAIN, never merely "unmaterialized")
+    CopyDesignVerify, // P6E-D - independent, read-only re-verification of an existing (by operationId) Copy Design operation. No copy, no rewire, no save, no materialize, no repair, no reservation.
     Status,
     Version,
     Revision,
@@ -60,6 +61,7 @@ public static class ArchCommands
         ArchCommand.CopyDesignPreview => true, // P6A (preview only - no execution command exists)
         ArchCommand.CopyDesignResume => true, // P6D ROUND 2
         ArchCommand.CopyDesignRecover => true, // P6D ROUND 3
+        ArchCommand.CopyDesignVerify => true, // P6E-D
         _ => false,
     };
 
@@ -74,11 +76,12 @@ public static class ArchCommands
         ArchCommand.ReferenceHealth => true,
         ArchCommand.RepairReference => true,
         ArchCommand.CopyDesignPreview => true,
-        // CopyDesignResume/CopyDesignRecover deliberately do NOT require an
-        // active document - the remembered attempt already carries its own
-        // plan/root path; each command reports "nothing to resume/recover"
-        // when none is remembered, rather than being gated on document
-        // context.
+        // CopyDesignResume/CopyDesignRecover/CopyDesignVerify deliberately do
+        // NOT require an active document - the remembered attempt (Resume/
+        // Recover) or the explicitly-typed operationId (Verify) already
+        // carries its own identity; each command reports "nothing to
+        // resume/recover/verify" or fails closed on bad input, rather than
+        // being gated on document context.
         ArchCommand.Status => true,
         ArchCommand.Version => true,
         ArchCommand.Revision => true,
@@ -105,6 +108,7 @@ public static class ArchCommands
         ArchCommand.CopyDesignPreview => "Copy Design Preview",
         ArchCommand.CopyDesignResume => "Resume Copy Design",
         ArchCommand.CopyDesignRecover => "Recover Copy Design",
+        ArchCommand.CopyDesignVerify => "Verify Copy Design",
         ArchCommand.Status => "Status",
         ArchCommand.Version => "Version",
         ArchCommand.Revision => "Revision",
@@ -145,6 +149,7 @@ public static class ArchCommands
                 ArchCommand.CopyDesignPreview => "Preview a Copy Design plan for the active document: discovers its dependency structure and proposes COPY / REUSE for each node. Read-only - never copies, renames, saves, or replaces anything.",
                 ArchCommand.CopyDesignResume => "Deliberately retry the LAST Apply Copy Design attempt that was reserved but did not fully materialize, continuing with the SAME operation - never re-copies or re-materializes anything already done, and never creates a new CadDocument.",
                 ArchCommand.CopyDesignRecover => "Deliberately retry the LAST Apply Copy Design attempt whose outcome is UNKNOWN (the reservation call itself never returned an answer) - replays the SAME idempotency key/request; returns the SAME operation if the server already committed it, or safely creates it if not. Never mints a new key, never auto-retries on its own.",
+                ArchCommand.CopyDesignVerify => "Independently re-verify an existing Copy Design operation by its operation id: source integrity, destination integrity, and reference topology. Read-only - never copies, rewires, saves, materializes, repairs, or triggers Apply/Resume.",
                 _ => command.DisplayName(),
             }
             : $"{command.DisplayName()} is not available yet. Coming in a later release.";
@@ -158,7 +163,7 @@ public static class ArchCommands
         ArchCommand.SignIn, ArchCommand.SignOut, ArchCommand.ServerStatus,
         ArchCommand.GetLatest, ArchCommand.Checkout, ArchCommand.CheckIn, ArchCommand.UndoCheckout,
         ArchCommand.ScanReferences, ArchCommand.ReferenceHealth, ArchCommand.RepairReference,
-        ArchCommand.CopyDesignPreview, ArchCommand.CopyDesignResume, ArchCommand.CopyDesignRecover,
+        ArchCommand.CopyDesignPreview, ArchCommand.CopyDesignResume, ArchCommand.CopyDesignRecover, ArchCommand.CopyDesignVerify,
         ArchCommand.Status, ArchCommand.Version, ArchCommand.Revision, ArchCommand.WhereUsed,
     };
 }
